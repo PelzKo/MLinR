@@ -9,9 +9,9 @@ output:
 
 # Predicting chickenpox from microbiome data
 
-This notebook will show you the basics of using R to train a Random Forest Classifier. In theory, all kinds of features can be used for prediction, here we will use merged ASVs from a public dataset. It compares the gut microbial communities from 85 subjects, measured weekly over three months. A total of 864 samples / subjects are represented in this dataset, and 507 genera.
-ID: PRJEB5729 / ERP005153
-See more details here: Flores, G., et al. (2014). Temporal variability is a personalized feature of the human microbiome. Genome Biology, 15, 531.
+This notebook will show you the basics of using R to train a Random Forest Classifier. In theory, all kinds of features can be used for prediction, here we will use merged ASVs from a public dataset of the american gut project. It compares the gut microbial communities from 4,850 subjects. A total of 864 samples / subjects are represented in this dataset, and 507 genera.
+ID: PRJEB11419 / ERP012803
+
 
 # Preparations
 
@@ -21,43 +21,53 @@ if(!require(tidymodels)) install.packages('tidymodels')
 if(!require(tidyverse)) install.packages('tidyverse')
 if(!require(vip)) install.packages('vip')
 if(!require(ranger)) install.packages('ranger')
-if(!require(themis)) install.packages('themis')
 
 library(tidyverse)
 library(tidymodels)
 library(vip)
 library(ranger)
-library(themis)
 ```
 
 We will start with loading the data and inspecting it. As the dataset is really big, we need to load it in chunks
 ```{r}
-file_location <- "/home/konstantin/Downloads/13733642/"
-project_id <- "PRJEB11419" #"PRJEB5729"
+file_location <- "/home/konstantin/Downloads/13733642/"  #"INSERT_PATH_TO_DATA"
+project_id <- "PRJEB11419"
 
+# Loading all relevant files
 f <- function(x, pos) subset(x, str_starts(sample, project_id))
 taxonomic_table <- read_csv_chunked(paste0(file_location, "taxonomic_table.csv.gz"), DataFrameCallback$new(f))
-taxonomic_table_only_measured <- taxonomic_table |>
-  select(-sample)
-taxonomic_table_only_measured <- taxonomic_table_only_measured[,colSums(abs(taxonomic_table_only_measured)) > 0]
-taxonomic_table_only_measured <- taxonomic_table_only_measured |>
-  mutate(project = strsplit(taxonomic_table$sample,"_", fixed = TRUE) |> map_chr(1)) |>
-  mutate(srr = strsplit(taxonomic_table$sample,"_", fixed = TRUE) |> map_chr(2))
-  
-
 tags <- read_tsv(paste0(file_location, "tags.tsv.gz")) |> filter(project == project_id)
 sample_metadata <- read_tsv(paste0(file_location, "sample_metadata.tsv")) |> filter(project == project_id)
 projects <- read_csv(paste0(file_location, "projects.csv")) |> filter(project == project_id)
 
+# Remove columns which were not measured and thus contain only zeros
+taxonomic_table_only_measured <- taxonomic_table |>
+  select(-sample)
+taxonomic_table_only_measured <- taxonomic_table_only_measured[,colSums(abs(taxonomic_table_only_measured)) > 0]
+# Alternative
+# taxonomic_table_only_measured <- taxonomic_table |> select_if(~ !all(. == 0))
+
+# Split sample id into project and srr 
+taxonomic_table_only_measured <- taxonomic_table_only_measured |>
+  mutate(project = strsplit(taxonomic_table$sample,"_", fixed = TRUE) |> map_chr(1)) |>
+  mutate(srr = strsplit(taxonomic_table$sample,"_", fixed = TRUE) |> map_chr(2))
+
+# Important: No balancing or normalization before we split the data!
+
 # finally, we will inspect the metadata:
-#print('Number of samples per enterotype:')
-#table(metadata$Enterotype)
-#print('Number of samples per sequencing technology:')
-#table(metadata$SeqTech)
-#host_subject_id
+print('Number of samples per diagnosis:')
+tags |>
+  filter(tag=="chickenpox") |>
+  count(value) |>
+  print()
+  
+print('Number of samples per sequencing technology:')
+sample_metadata |> 
+  count(instrument) |>
+  print()
 ```
 # Random Forest
-From here we will start with the actual setup of the model. We will set it up to predict whether a sample is classified as having the an chickenpox using the measured genera.
+From here we will start with the actual setup of the model. We will set it up to predict whether a sample is classified as having chickenpox using the measured genera. Question: Which output variables do we want to predict? Answer: Only yes and no.
 
 For better convenience, we will combine the ASV table with the one column from the metadata which holds the information about chickenpox (`chickenpox` values).
 ```{r}
@@ -74,7 +84,7 @@ samples_without_information <- model_data |>
   mutate(chickenpox = as.factor(chickenpox))
 
 model_data <- model_data |>
-  subset(!is.na(chickenpox) & !(chickenpox %in% non_information_values)) |>
+  filter(!is.na(chickenpox) & !(chickenpox %in% non_information_values)) |>
   mutate(chickenpox = as.factor(chickenpox))
 
 ggplot(model_data, aes(x=chickenpox, fill=chickenpox))+
@@ -84,7 +94,7 @@ ggplot(model_data, aes(x=chickenpox, fill=chickenpox))+
 ```
 ## Prepare data splits
 
-We want to split the data into training and testing. During data splitting, we have to take care, that the proportion of chickenpox stays equal between both data splits.
+We want to split the data into training and testing. During data splitting, we have to take care that the proportion of chickenpox stays equal between both data splits.
 ```{r}
 set.seed(123)
 split <- initial_split(data = model_data, 
@@ -102,8 +112,8 @@ test_data <- testing(split)
 Now we can prepare the workflow for our RF in order to find the best hyperparameters. We will use 5-fold cross-validation with 2 repeats on our training data to test the different parameter values.
 
 ```{r}
-train_recipe <- recipe(chickenpox ~ ., data = train_data) |>
-  step_downsample(chickenpox)
+train_recipe <- recipe(chickenpox ~ ., data = train_data) #|>
+  #step_downsample(chickenpox) # Possible but we want to create a screening model, so it is best to have a slight imbalance towards the positive class, step_downsample is from the package themis
 
 tuning_specs <- parsnip::rand_forest(
   mtry = tune(), 
@@ -237,7 +247,7 @@ final_rf |>
 ```
 ## Apply model to unkown samples
 
-Remember the samples we removed earlier, because they had no label of their enterotype? It looks like our model generalized well enough that we can apply it now to predict the enterotypes of these samples using their microbial composition!
+Remember the samples we removed earlier, because they had no definitive label regarding chickenpox? It looks like our model generalized well enough that we can apply it now to predict the disease label of these samples using their microbial composition!
 
 ```{r}
 predicted_labels <- predict(final_rf, new_data = samples_without_information)
