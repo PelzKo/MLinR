@@ -1,8 +1,9 @@
 ---
 title: "Machine learning with R in the Life Sciences"
 author: "Konstantin Pelz"
-date: '2025-02-17'
+date: "2025-02-17"
 output:
+  pdf_document: default
   html_document:
     df_print: paged
 ---
@@ -151,7 +152,7 @@ tuning_grid
 With our set of 125 combinations for hyperparameter values, we are ready to tune! We will fit a model for all combinations and explore the results.
 *Advanced:* implement parallelization to speed up the training process, details are here: https://tune.tidymodels.org/articles/extras/optimizations.html#parallel-processing 
 
-```{r}
+```{r echo = T, results = 'hide', message=F, warning=F}
 # this can take some minutes, it has to create a RF for each of the 125 combinations ...
 tuning_results <- tune_grid(
   tuning_workflow, 
@@ -223,7 +224,7 @@ autoplot(confusion_matrix, type = "heatmap") +
         y = "Actual chickenpox"
     ) +
     theme_minimal()+
-  theme(axis.text = element_text(size=15))
+  theme(axis.text = element_text(size=15), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 ```
 
 
