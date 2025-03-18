@@ -22,11 +22,13 @@ if(!require(tidymodels)) install.packages('tidymodels')
 if(!require(tidyverse)) install.packages('tidyverse')
 if(!require(vip)) install.packages('vip')
 if(!require(ranger)) install.packages('ranger')
+if(!require(themis)) install.packages('themis')
 
 library(tidyverse)
 library(tidymodels)
 library(vip)
 library(ranger)
+library(themis)
 ```
 
 We will start with loading the data and inspecting it. As the dataset is really big, we need to load it in chunks
@@ -113,8 +115,8 @@ test_data <- testing(split)
 Now we can prepare the workflow for our RF in order to find the best hyperparameters. We will use 5-fold cross-validation with 2 repeats on our training data to test the different parameter values.
 
 ```{r}
-train_recipe <- recipe(chickenpox ~ ., data = train_data) #|>
-  #step_downsample(chickenpox) # Possible but we want to create a screening model, so it is best to have a slight imbalance towards the positive class, step_downsample is from the package themis
+train_recipe <- recipe(chickenpox ~ ., data = train_data) |>
+  step_downsample(chickenpox) # Possible but we want to create a screening model, so it is best to have a slight imbalance towards the positive class, step_downsample is from the package themis
 
 tuning_specs <- parsnip::rand_forest(
   mtry = tune(), 
