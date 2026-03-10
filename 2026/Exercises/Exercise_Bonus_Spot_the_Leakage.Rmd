@@ -1,0 +1,287 @@
+---
+title: "Bonus Exercise: Spot the Leakage"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+Data leakage is one of the most common and dangerous mistakes in machine learning.
+It leads to **over-optimistic performance estimates** that do not hold up on new data.
+In this exercise, you will examine code snippets that contain leakage, identify the
+problem, and understand why the corrected version is better.
+
+**Time:** ~10 minutes
+
+**Corresponds to:** Pitfalls section of the lecture
+
+**Reference:** Bernett et al. (2024). "Guiding questions to avoid data leakage in biological
+machine learning applications." *Nature Methods*. DOI: 10.1038/s41592-024-02362-y
+
+---
+
+# 0 -- Setup
+
+```{r}
+if (!require(tidymodels)) install.packages("tidymodels")
+if (!require(tidyverse))  install.packages("tidyverse")
+
+library(tidyverse)
+library(tidymodels)
+
+# ---- Same simulated data ----
+set.seed(2025)
+n_samples <- 200; n_genes <- 50; n_de_genes <- 10
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+expression_matrix <- matrix(
+  rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+  nrow = n_samples, ncol = n_genes
+)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+gene_data <- as.data.frame(expression_matrix) |> mutate(class = sample_class)
+```
+
+---
+
+# Scenario 1: Normalizing Before Splitting
+
+A colleague shows you their preprocessing code. They normalize the data, then split
+it into train and test sets.
+
+## Version A (Their code)
+
+```{r}
+set.seed(123)
+
+# Step 1: Normalize ALL data
+all_data_scaled <- gene_data |>
+  mutate(across(starts_with("gene_"), scale))
+
+# Step 2: THEN split
+split_A <- initial_split(all_data_scaled, prop = 0.75, strata = class)
+train_A <- training(split_A)
+test_A  <- testing(split_A)
+```
+
+## Version B (Alternative)
+
+```{r}
+set.seed(123)
+
+# Step 1: Split FIRST
+split_B <- initial_split(gene_data, prop = 0.75, strata = class)
+train_B <- training(split_B)
+test_B  <- testing(split_B)
+
+# Step 2: Normalize using ONLY training data statistics
+# (tidymodels recipes handle this automatically)
+recipe_B <- recipe(class ~ ., data = train_B) |>
+  step_normalize(all_numeric_predictors())
+```
+
+### YOUR TURN B.1
+
+**Which version contains data leakage? Explain why.**
+
+Write your answer here:
+
+> *Your answer:* ___
+>
+>
+>
+
+### YOUR TURN B.2
+
+**Why does it matter?** Think about what `scale()` computes (the mean and standard
+deviation). Where does the information from the test set "leak" into the training process?
+
+> *Your answer:* ___
+>
+>
+>
+
+---
+
+# Scenario 2: Feature Selection Before Cross-Validation
+
+Another colleague selects the most informative genes before running cross-validation.
+
+## Version A (Their code)
+
+```{r}
+set.seed(123)
+
+# Step 1: Find the top 10 genes by t-test across ALL training data
+split_2 <- initial_split(gene_data, prop = 0.75, strata = class)
+train_2 <- training(split_2)
+
+# Run t-tests on the full training set
+p_values <- sapply(paste0("gene_", 1:50), function(g) {
+  t.test(train_2[[g]] ~ train_2$class)$p.value
+})
+top_genes <- names(sort(p_values))[1:10]
+cat("Selected genes:", top_genes, "\n")
+
+# Step 2: Subset to top genes, THEN do cross-validation
+train_selected <- train_2 |> select(all_of(top_genes), class)
+
+cv_A <- vfold_cv(train_selected, v = 5, strata = class)
+
+rf_wf <- workflow() |>
+  add_recipe(recipe(class ~ ., data = train_selected)) |>
+  add_model(rand_forest(trees = 500) |> set_mode("classification") |> set_engine("ranger"))
+
+results_A <- rf_wf |> fit_resamples(resamples = cv_A)
+cat("\nResults with pre-selected genes:\n")
+results_A |> collect_metrics()
+```
+
+## Version B (Alternative)
+
+```{r}
+set.seed(123)
+
+split_2B <- initial_split(gene_data, prop = 0.75, strata = class)
+train_2B <- training(split_2B)
+
+# Feature selection happens INSIDE the recipe (and thus inside CV)
+recipe_2B <- recipe(class ~ ., data = train_2B) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_corr(all_numeric_predictors(), threshold = 0.9)
+
+cv_B <- vfold_cv(train_2B, v = 5, strata = class)
+
+rf_wf_B <- workflow() |>
+  add_recipe(recipe_2B) |>
+  add_model(rand_forest(trees = 500) |> set_mode("classification") |> set_engine("ranger"))
+
+results_B <- rf_wf_B |> fit_resamples(resamples = cv_B)
+cat("\nResults with recipe-based feature handling:\n")
+results_B |> collect_metrics()
+```
+
+### YOUR TURN B.3
+
+**Which version contains data leakage? Explain the problem.**
+
+> *Your answer:* ___
+>
+>
+>
+
+### YOUR TURN B.4
+
+**Why is Version A particularly dangerous for publication?**
+
+Think about what happens when the selected genes are used on completely new data
+from a different hospital or cohort.
+
+> *Your answer:* ___
+>
+>
+>
+
+---
+
+# Scenario 3: The Sneaky Shortcut
+
+A student is predicting tumor vs. normal from gene expression data. Their model
+achieves 99.8% accuracy. Suspiciously good!
+
+```{r}
+set.seed(2025)
+
+# Their dataset includes a hidden problem
+sneaky_data <- gene_data |>
+  mutate(
+    batch = ifelse(class == "tumor", "batch_1", "batch_2"),
+    measurement_time = ifelse(class == "tumor",
+                              rnorm(n(), mean = 9, sd = 0.5),   # morning
+                              rnorm(n(), mean = 15, sd = 0.5))  # afternoon
+  )
+
+cat("Preview of the data:\n")
+sneaky_data |> select(class, batch, measurement_time, gene_1, gene_2) |> head(10)
+```
+
+### YOUR TURN B.5
+
+**What is wrong with this dataset? Why would a model achieve near-perfect accuracy,
+and why would this NOT work on new data?**
+
+> *Your answer:* ___
+>
+>
+>
+
+### YOUR TURN B.6
+
+**Name two types of information in this dataset that the model could use as shortcuts
+instead of learning the actual biological signal.**
+
+> *Your answer:* ___
+>
+>
+>
+
+---
+
+# A Leakage Checklist
+
+When conducting ML in your research, ask yourself these questions (adapted from
+Bernett et al. 2024):
+
+1. **Was any preprocessing done on the full dataset before splitting?**
+   Normalization, feature selection, imputation, and outlier removal should all
+   happen AFTER splitting (or inside the CV loop via recipes).
+
+2. **Could any feature serve as a proxy for the label?**
+   Batch IDs, measurement times, hospital codes, or technician IDs that correlate
+   with the outcome will give misleadingly high performance.
+
+3. **Are there duplicate or near-duplicate samples?**
+   Technical replicates of the same patient in both train and test sets will inflate
+   performance. Split by patient ID, not by sample.
+
+4. **Was feature selection done inside or outside the CV loop?**
+   If outside, the model has already "peeked" at the test fold information through
+   the feature selection step.
+
+5. **Is the test set performance suspiciously close to the CV performance?**
+   Some gap is normal. If test performance is much higher than expected,
+   investigate potential leakage.
+
+---
+
+# Summary
+
+Data leakage means that information from the test set (or future data) influences the
+training process. Common forms include:
+
+- Normalizing or preprocessing before splitting
+- Selecting features on the full dataset before CV
+- Confounding variables (batch effects, measurement artifacts) that correlate with
+  the target
+- Duplicate samples across train and test
+
+**Key takeaway:** If your model seems too good to be true, it probably is. Always check
+for leakage before trusting your results.
+
+---
+
+*This concludes the hands-on exercises for Day 1. Tomorrow you will apply everything
+you learned in a group project on a real transcriptomics dataset!*

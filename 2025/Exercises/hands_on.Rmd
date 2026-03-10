@@ -1,0 +1,231 @@
+---
+title: "Machine learning with R in the Life Sciences"
+author: "Konstantin Pelz"
+date: '2025-02-17'
+output:
+  html_document:
+    df_print: paged
+---
+
+# Predicting chickenpox from microbiome data
+
+This notebook will show you the basics of using R to train a Random Forest Classifier. In theory, all kinds of features can be used for prediction, here we will use merged ASVs from a public dataset of the american gut project. It compares the gut microbial communities from 4,850 subjects. A total of 864 samples / subjects are represented in this dataset, and 507 genera.
+ID: PRJEB11419 / ERP012803
+
+# Preparations
+
+First we have to load (and if necessary install) a few packages for later.
+```{r}
+if(!require(tidymodels)) install.packages('tidymodels')
+if(!require(tidyverse)) install.packages('tidyverse')
+if(!require(vip)) install.packages('vip')
+if(!require(ranger)) install.packages('ranger')
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(ranger)
+```
+
+We will start with loading the data and inspecting it. As the dataset is really big, we need to load it in chunks. We also need to get rid of the data that is not relevant.
+```{r}
+file_location <- "/home/konstantin/Downloads/13733642/"  #"INSERT_PATH_TO_DATA"
+project_id <- "PRJEB11419"
+
+# Loading all relevant files
+f <- function(x, pos) subset(x, str_starts(sample, project_id))
+taxonomic_table <- read_csv_chunked(paste0(file_location, "taxonomic_table.csv.gz"), DataFrameCallback$new(f))
+tags <- read_tsv(paste0(file_location, "tags.tsv.gz")) |> filter(project == project_id)
+sample_metadata <- read_tsv(paste0(file_location, "sample_metadata.tsv")) |> filter(project == project_id)
+projects <- read_csv(paste0(file_location, "projects.csv")) |> filter(project == project_id)
+
+# TODO: PERFORM SOME DATA PROCESSING
+# MAKE IT TIDY (https://tidyr.tidyverse.org/articles/tidy-data.html#tidying) -> measurement columns can stay the same
+# NORMALIZATION?
+# BALANCING?
+
+# finally, we will inspect the metadata:
+print('Number of samples per diagnosis:')
+tags |>
+  filter(tag=="chickenpox") |>
+  count(value) |>
+  print()
+  
+print('Number of samples per sequencing technology:')
+sample_metadata |> 
+  count(instrument) |>
+  print()
+```
+# Random Forest
+From here we will start with the actual setup of the model. We will set it up to predict whether a sample is classified as having chickenpox using the measured genera. Question: Which output variables do we want to predict?
+
+For better convenience, we will combine the ASV table with the one column from the metadata which holds the information about chickenpox (`chickenpox` values).
+```{r}
+model_data <- tidy_taxonomic_table |>
+  ... # TODO: prepare data for model training
+
+ggplot(model_data, aes(x=chickenpox, fill=chickenpox))+
+  geom_bar()+
+  theme_minimal()+
+  ggtitle('Class distribution for chickenpox')
+```
+## Prepare data splits
+
+We want to split the data into training and testing. During data splitting, we have to take care that the proportion of chickenpox stays equal between both data splits.
+```{r}
+set.seed(123)
+split <- initial_split(data = model_data, 
+                       prop = c(0.75), 
+                       strata = chickenpox)
+
+split
+
+train_data <- training(split)
+test_data <- testing(split)
+```
+
+## Prepare model workflow for parameter selection
+
+Now we can prepare the workflow for our RF in order to find the best hyperparameters. We will use 5-fold cross-validation with 2 repeats on our training data to test the different parameter values.
+
+```{r}
+train_recipe <- recipe(chickenpox ~ ., data = train_data)
+
+tuning_specs <- parsnip::rand_forest(
+  mtry = tune(), 
+  trees = tune(), 
+  min_n = tune()
+) |>
+  set_mode('classification') |>
+  set_engine('ranger', importance = 'impurity')
+
+tuning_workflow <- workflow() |>
+  add_recipe(train_recipe) |>
+  add_model(tuning_specs)
+
+training_folds <- rsample::vfold_cv(data = train_data, v = 5, repeats = 2)
+
+tuning_workflow
+```
+
+Now we can create a grid of values for each hyperparameter that will be tested. 
+*Advanced:* You can also try out random grid search instead of regular grid search, details are here: https://www.tmwr.org/grid-search#irregular-grids
+
+```{r}
+tuning_grid <- #TODO: create a grid of hyperparameters to tune on. Choose a range for each hyperparameter that makes sense for you
+
+tuning_grid
+```
+
+## Train the RF model using cross-validation
+
+With our set of 125 combinations for hyperparameter values, we are ready to tune! We will fit a model for all combinations and explore the results.
+*Advanced:* implement parallelization to speed up the training process, details are here: https://tune.tidymodels.org/articles/extras/optimizations.html#parallel-processing 
+
+```{r}
+# this can take some minutes, it has to create a RF for each of the 125 combinations ...
+tuning_results <- tune_grid(
+  tuning_workflow, 
+  resamples = training_folds,
+  grid=tuning_grid,
+  metrics = metric_set(TODO), # TODO: get an overview which metrics you can specify here and choose the accuracy, f1 score (called f measure in the yardstick package), and one measure of your choice
+  control = control_grid(save_pred = TRUE, verbose = TRUE)
+)
+
+tuning_metrics <- tuning_results |>
+  collect_metrics()
+
+show_best(tuning_results, metric = 'f_meas', n = 3)
+```
+
+
+
+
+## Check performance on the test dataset
+
+In order to check if our model with the best hyperparameters is able to generalize, we will now apply it to the unseen test set. 
+
+```{r}
+best_model <- tuning_results |> 
+  select_best(metric = 'f_meas')
+
+final_workflow <- tuning_workflow |>
+  finalize_workflow(best_model)
+
+final_workflow
+```
+
+First, we fit the best model to the whole training data again (remember, before we only fit it to the cross-validation sets one at a time). This command will also automatically apply the model to the test set after re-fitting to the training data.
+
+```{r}
+final_fit <- final_workflow |> 
+  last_fit(split, metrics = metric_set(accuracy, f_meas, roc_auc)) 
+
+roc_df <- final_fit |> 
+    collect_predictions() |> 
+    dplyr::rename('prediction' = .pred_class) |>
+    dplyr::rename('no' = .pred_yes) |>
+    roc_curve(truth = chickenpox, starts_with('.pred_'))
+
+ ggplot(roc_df, aes(x=1-specificity, y=sensitivity))+
+   geom_path()+
+   geom_abline(linetype = 'dashed')+
+   theme_bw()
+```
+
+We can also take a look at the F1 measure (`f_meas`) and Accuracy of our model on the test set:
+Advanced: Also look at other performance metrics, details are here: https://www.tmwr.org/performance#multiclass-classification-metrics and https://yardstick.tidymodels.org/articles/metric-types.html#metrics 
+```{r}
+final_fit |> 
+    collect_metrics()
+
+```
+
+Finally, here are the actual predictions of our model in form of a confusion matrix:
+```{r}
+confusion_matrix <- final_fit |> 
+  collect_predictions() |> 
+  conf_mat(truth = `.pred_class`, estimate = chickenpox)
+
+autoplot(confusion_matrix, type = "heatmap") + 
+    labs(
+        title = "Confusion Matrix",
+        x = "Predicted chickenpox",
+        y = "Actual chickenpox"
+    ) +
+    theme_minimal()+
+  theme(axis.text = element_text(size=15))
+```
+
+
+## Feature importance
+
+Now lets inspect our model in more detail. First we will extract it and check the OOB error value.
+
+```{r}
+# extract the actual model from the final fit object
+final_rf <- extract_workflow(final_fit)
+final_rf
+```
+
+Now we can also check, which ASV features were most important in this final model.
+*More Advanced:* compare the importance values you get using gini impurity and permutation accuracy, details are here: https://www.rdocumentation.org/packages/ranger/versions/0.16.0/topics/ranger 
+
+```{r}
+final_rf |>
+  extract_fit_parsnip() |>
+  vip(geom = 'point')
+```
+## Apply model to unkown samples
+
+Remember the samples we removed earlier, because they had no definitive label regarding chickenpox? It looks like our model generalized well enough that we can apply it now to predict the disease label of these samples using their microbial composition!
+
+```{r}
+predicted_labels <- predict(final_rf, new_data = samples_without_information)
+samples_without_information$chickenpox <- predicted_labels$.pred_class
+
+ggplot(samples_without_information, aes(x=chickenpox, fill=chickenpox))+
+  geom_bar()+
+  theme_minimal()+
+  ggtitle('Predicted labels')
+```

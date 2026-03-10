@@ -1,0 +1,281 @@
+---
+title: "Exercise 4: Model Comparison with Cross-Validation"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+In Exercise 3, you trained a single model and evaluated it once on the test set. But how
+do you know this result is not just lucky? And how do you compare two different models
+fairly? In this exercise you will use **cross-validation** to get robust performance
+estimates and compare **logistic regression** vs. **random forest** on the same data.
+
+**Time:** ~15 minutes
+
+**Corresponds to:** Model Selection + Cross-Validation sections of the lecture
+
+---
+
+# 0 -- Setup and Data
+
+We reuse the simulated transcriptomics dataset from Exercise 3.
+
+```{r}
+if (!require(tidymodels)) install.packages("tidymodels")
+if (!require(tidyverse))  install.packages("tidyverse")
+if (!require(ranger))     install.packages("ranger")
+
+library(tidyverse)
+library(tidymodels)
+
+# ---- Simulate the same dataset as Exercise 3 ----
+set.seed(2025)
+n_samples <- 200; n_genes <- 50; n_de_genes <- 10
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+expression_matrix <- matrix(
+  rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+  nrow = n_samples, ncol = n_genes
+)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+gene_data <- as.data.frame(expression_matrix) |> mutate(class = sample_class)
+
+# ---- Train/test split (same as Exercise 3) ----
+set.seed(123)
+split <- initial_split(gene_data, prop = 0.75, strata = class)
+train_data <- training(split)
+test_data  <- testing(split)
+
+cat("Training samples:", nrow(train_data), "\n")
+```
+
+---
+
+# 1 -- Set Up Cross-Validation Folds
+
+Instead of evaluating on a single test set, cross-validation splits the **training data**
+into multiple folds. Each fold takes a turn as the validation set while the remaining
+folds are used for training.
+
+### YOUR TURN 4.1
+
+Create 5-fold cross-validation folds from the training data, stratified by class.
+
+```{r}
+set.seed(42)
+
+cv_folds <- vfold_cv(
+  data   = ___,
+  v      = ___,
+  strata = ___
+)
+
+cv_folds
+```
+
+> **CHECKPOINT:** You should see a tibble with 5 rows, each containing a different
+> train/validation split.
+
+---
+
+# 2 -- Define Two Models
+
+We compare logistic regression (simple, linear) against random forest (complex,
+non-linear). Switching models in tidymodels is as easy as changing the specification.
+
+### YOUR TURN 4.2
+
+Complete both model specifications.
+
+```{r}
+# Model 1: Logistic Regression
+logreg_spec <- logistic_reg() |>
+  set_mode("___") |>
+  set_engine("glm")
+
+# Model 2: Random Forest
+rf_spec <- rand_forest(trees = 500) |>
+  set_mode("___") |>
+  set_engine("ranger")
+```
+
+---
+
+# 3 -- Define a Shared Recipe
+
+Both models will use the same preprocessing recipe, ensuring a fair comparison.
+
+```{r}
+shared_recipe <- recipe(class ~ ., data = train_data)
+```
+
+---
+
+# 4 -- Create Workflows and Evaluate with CV
+
+### YOUR TURN 4.3
+
+Create a workflow for each model, then use `fit_resamples()` to evaluate across folds.
+
+```{r}
+# Define which metrics we want
+eval_metrics <- metric_set(accuracy, sensitivity, specificity, f_meas)
+
+# ---- Logistic Regression ----
+logreg_wf <- workflow() |>
+  add_recipe(shared_recipe) |>
+  add_model(___)
+
+logreg_cv_results <- logreg_wf |>
+  fit_resamples(
+    resamples = ___,
+    metrics   = eval_metrics
+  )
+
+# ---- Random Forest ----
+rf_wf <- workflow() |>
+  add_recipe(shared_recipe) |>
+  add_model(___)
+
+rf_cv_results <- rf_wf |>
+  fit_resamples(
+    resamples = ___,
+    metrics   = eval_metrics
+  )
+```
+
+---
+
+# 5 -- Compare Results
+
+### YOUR TURN 4.4
+
+Extract and compare the mean metrics across folds.
+
+```{r}
+logreg_metrics <- logreg_cv_results |>
+  collect_metrics() |>
+  mutate(model = "Logistic Regression")
+
+rf_metrics <- rf_cv_results |>
+  collect_metrics() |>
+  mutate(model = "Random Forest")
+
+comparison <- bind_rows(logreg_metrics, rf_metrics) |>
+  select(model, .metric, mean, std_err)
+
+comparison
+```
+
+### YOUR TURN 4.5
+
+Visualize the comparison with error bars.
+
+```{r}
+ggplot(comparison, aes(x = .metric, y = mean, fill = ___)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean - std_err, ymax = mean + std_err),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  theme_minimal() +
+  labs(title = "Model Comparison: Logistic Regression vs. Random Forest",
+       x = "Metric", y = "Value", fill = "Model") +
+  coord_cartesian(ylim = c(0.5, 1.0))
+```
+
+> **CHECKPOINT:** Both models should perform well (accuracy > 0.80).
+> Standard errors tell you how much performance varies across folds.
+
+---
+
+# 6 -- Interpret the Results
+
+**Discussion questions:**
+
+1. Which model has higher mean accuracy? Is the difference large compared to the
+   standard error bars? If the error bars overlap, can you confidently say one model
+   is better?
+
+2. Look at **sensitivity** (ability to detect tumor) and **specificity** (ability to identify
+   normal). Are they balanced? What would happen if you optimized only accuracy?
+
+3. Logistic regression is linear and random forest is non-linear. For this simulated
+   dataset, do you think the relationship between expression and class is linear or
+   non-linear? Does the comparison support your answer?
+
+4. We used 5 folds. What would change with 10 folds? With leave-one-out?
+   What are the trade-offs?
+
+---
+
+# 7 -- (Stretch Goal) Repeated Cross-Validation
+
+Repeating CV with different fold assignments gives more robust estimates.
+
+### YOUR TURN 4.6 (Optional)
+
+Create repeated 5-fold CV with 3 repeats and rerun the random forest.
+
+```{r}
+set.seed(42)
+
+repeated_folds <- vfold_cv(
+  data    = train_data,
+  v       = 5,
+  repeats = ___,
+  strata  = class
+)
+
+rf_repeated_results <- rf_wf |>
+  fit_resamples(
+    resamples = ___,
+    metrics   = eval_metrics
+  )
+
+rf_repeated_results |> collect_metrics()
+```
+
+---
+
+# Summary
+
+You practiced:
+
+- Creating cross-validation folds with `vfold_cv()` and stratification
+- Defining multiple model specifications and workflows
+- Evaluating models with `fit_resamples()` and custom metric sets
+- Comparing models using mean metrics and standard errors
+
+**Key takeaway:** Never compare models based on a single train/test split. Always use
+cross-validation. A model 1% better in accuracy but with 5% standard error is not
+meaningfully better.
+
+---
+
+# Hints
+
+- 4.1: Use `train_data`, 5 folds, stratify by `class`.
+- 4.2: Both models use `classification` mode.
+- 4.3: Add `logreg_spec` / `rf_spec`. Use `cv_folds` as resamples.
+- 4.5: Fill by `model`.
+- 4.6: Use 3 repeats and `repeated_folds` as resamples.
+
+---
+
+*Next up: Exercise 5 -- Tuning and Final Evaluation*

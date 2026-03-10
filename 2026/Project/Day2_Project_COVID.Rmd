@@ -1,0 +1,484 @@
+---
+title: "Day 2 Project: Predicting COVID-19 Severity from Blood Transcriptomics"
+subtitle: "Machine Learning with R in the Life Sciences"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+---
+
+# Welcome to the Day 2 Project!
+
+Today you will apply everything you learned yesterday to a **real RNA-Seq
+dataset** from COVID-19 patients. The data comes from **GSE157103**: bulk
+RNA-seq of peripheral blood leukocytes from 126 hospitalized patients.
+
+You will work through the full ML pipeline: explore the data, preprocess it,
+train classifiers, evaluate performance, and interpret the results biologically.
+
+**Choose one of two classification tasks:**
+
+- **Task A:** Predict **COVID-19 diagnosis** (COVID-19 vs. non-COVID-19) —
+  a binary classification with clear transcriptomic signal
+- **Task B:** Predict **ICU admission** (ICU vs. non-ICU) among COVID-19
+  patients only — a harder binary classification with clinical relevance
+
+Both tasks use the same expression data. Task A uses all 126 samples, while
+Task B filters to the 100 COVID-19 positive patients.
+
+> **Reference:** Overmyer et al. (2021) "Large-Scale Multi-omic Analysis of
+> COVID-19 Severity." *Cell Systems* 12(1):23-40.
+
+---
+
+# 0. Setup
+
+Install and load all packages. **Run this cell first.**
+
+```{r packages}
+# Install if needed (uncomment lines you need)
+# install.packages(c("tidyverse", "tidymodels", "ranger", "glmnet", "vip"))
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+```
+
+---
+
+# 1. Load and Explore the Data
+
+## 1.1 Load the files
+
+```{r load-data}
+# Load expression data (126 samples × 5000 genes, log2(TPM+1) transformed)
+expr <- read_csv("covid_expression.csv", show_col_types = FALSE)
+
+# Load clinical metadata
+meta <- read_csv("covid_metadata.csv", show_col_types = FALSE)
+
+# Quick check — how many samples and genes?
+dim(expr)
+dim(meta)
+```
+
+## 1.2 Prepare the ML dataset
+
+We merge expression and metadata, then define the classification target.
+
+```{r prepare-data}
+# Merge expression with metadata by sample_id
+ml_data <- expr |>
+  inner_join(meta, by = "sample_id")
+
+# ---- TASK A: COVID-19 diagnosis (all 126 samples) ----
+target_col <- "disease_state"
+ml_data <- ml_data |>
+  mutate(target = factor(___________,
+                         levels = _____________))
+
+# ---- TASK B: ICU admission (COVID-19 patients only, n=100) ----
+# Uncomment below and comment out Task A above to switch
+# target_col <- "icu"
+# ml_data <- ml_data |>
+#   filter(disease_state == "COVID-19") |>
+#   mutate(target = factor(________-, levels = ____________))
+
+# Check class distribution
+table(ml_data$target)
+```
+
+## 1.3 Explore the data
+
+### 1.3.1 Class balance
+
+**YOUR TURN:** Create a bar plot of the class distribution.
+
+```{r class-balance}
+# FILL IN: Create a bar plot showing the number of samples per class
+# Hint: ggplot(ml_data, aes(x = ___, fill = ___)) + geom_bar() + ...
+______
+```
+
+> **Question:** Is the dataset balanced? What challenges might this create?
+
+### 1.3.2 PCA visualization
+
+**YOUR TURN:** Run PCA on the gene expression data and visualize.
+
+```{r pca}
+# Step 1: Extract the gene columns (all numeric feature columns)
+
+
+# Step 2: Run PCA
+
+
+# Step 3: Calculate variance explained
+var_explained <- summary(pca_result)$importance[2, 1:2] * 100
+
+# Step 4: FILL IN — Plot PC1 vs PC2 coloured by target
+pca_df <- data.frame(_________________)
+
+# FILL IN: Create a scatter plot of PC1 vs PC2
+# Hint: ggplot(pca_df, aes(x = ___, y = ___, colour = ___)) + geom_point() + ...
+______
+```
+
+> **Question:** Do the classes separate in PCA space? What does this suggest
+> about how well ML might work on this task?
+
+---
+
+# 2. Feature Selection
+
+We will select the most variable genes to reduce dimensionality.
+
+```{r feature-selection}
+# FILL IN: Calculate variance of each gene across samples
+gene_variances <- ml_data |>
+  select(all_of(gene_cols)) |>
+  summarise(across(everything(), ___)) |>
+  pivot_longer(everything(), names_to = "gene", values_to = "variance") |>
+  arrange(desc(variance))
+
+# Look at the top 20 most variable genes
+head(gene_variances, 20)
+```
+
+```{r filter-rrna}
+# IMPORTANT: Remove ribosomal RNA genes before feature selection!
+# These are technical artifacts from incomplete rRNA depletion, not biology.
+# They start with "RNA5S", "RNA28S", "RNA18S", "RNA45S", etc.
+rrna_pattern <- "^RNA\\d+S"
+
+gene_variances_clean <- gene_variances |>
+  filter(!str_detect(gene, rrna_pattern))
+
+cat("Genes removed as rRNA:", 
+    nrow(gene_variances) - nrow(gene_variances_clean), "\n")
+cat("Genes remaining:", nrow(gene_variances_clean), "\n")
+```
+
+> **Question:** Why do we remove ribosomal RNA genes? What would happen if we
+> left them in — would the model still work, and would the results be
+> biologically interpretable?
+
+```{r select-top-genes}
+# Select the top 500 most variable genes
+n_features <- _____
+top_genes <- gene_variances |>
+  slice_head(n = n_features) |>
+  pull(gene)
+
+# Create a reduced dataset
+ml_reduced <- ml_data |>
+  select(sample_id, target, all_of(top_genes))
+
+cat("Reduced dataset:", nrow(ml_reduced), "samples,", n_features, "genes\n")
+```
+
+> **Question:** Why might using all 5000 genes be problematic? What is the
+> curse of dimensionality?
+
+---
+
+# 3. Set Up the ML Pipeline with tidymodels
+
+## 3.1 Define the recipe
+
+```{r recipe}
+# FILL IN: Create a tidymodels recipe
+# The formula should predict 'target' from all gene columns
+# Include normalization steps
+
+ml_recipe <- _____________
+
+# Check the recipe
+ml_recipe
+```
+
+## 3.2 Define cross-validation
+
+```{r cv-folds}
+# FILL IN: Create cross-validation folds
+# Hint: use vfold_cv() with a reasonable number of folds
+# Consider: we have 126 (or 100) samples — what fold count is appropriate?
+set.seed(42)
+cv_folds <- __________
+
+cv_folds
+```
+
+> **Question:** Why do we use stratified cross-validation? What would happen
+> without it when classes are imbalanced?
+
+---
+
+# 4. Train a Random Forest
+
+## 4.1 Specify the model
+
+```{r rf-spec}
+# FILL IN: Define a random forest specification
+rf_spec <- rand_forest(______) |>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("classification")
+```
+
+> **Hint:** A common rule of thumb for `mtry` is sqrt(number of features).
+> With 500 features, that is approximately `r round(sqrt(500))`.
+
+## 4.2 Create the workflow and fit
+
+```{r rf-workflow}
+rf_workflow <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(rf_spec)
+
+# Fit with cross-validation
+set.seed(42)
+rf_results <- fit_resamples(
+  rf_workflow,
+  resamples = cv_folds,
+  metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
+  control = control_resamples(save_pred = TRUE)
+)
+
+# FILL IN: Collect and display the metrics
+______
+```
+
+## 4.3 Examine the confusion matrix
+
+```{r rf-confusion}
+# FILL IN: Collect the predictions and create a confusion matrix
+rf_preds <- ______________
+
+# Hint: conf_mat(rf_preds, truth = ___, estimate = ___)
+______
+```
+
+> **Question:** Which type of error is more common — false positives or false
+> negatives? In a clinical setting, which error is more dangerous?
+
+---
+
+# 5. Train a Regularized Logistic Regression (Elastic Net)
+
+## 5.1 Specify the model
+
+```{r lr-spec}
+# FILL IN: Define a logistic regression specification with elastic net
+lr_spec <- logistic_reg(_______) |>
+  set_engine("glmnet") |>
+  set_mode("classification")
+```
+
+> **Think about it:** What is the difference between Lasso (mixture = 1) and
+> Ridge (mixture = 0)? Which one performs feature selection?
+
+## 5.2 Create the workflow and fit
+
+```{r lr-workflow}
+lr_workflow <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(lr_spec)
+
+# Fit with cross-validation
+set.seed(42)
+lr_results <- fit_resamples(
+  lr_workflow,
+  resamples = cv_folds,
+  metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
+  control = control_resamples(save_pred = TRUE)
+)
+
+# Collect metrics
+collect_metrics(lr_results)
+```
+
+## 5.3 Compare models
+
+```{r compare-models}
+# FILL IN: Create a comparison table of RF vs Logistic Regression
+rf_metrics <- collect_metrics(rf_results) |> mutate(model = "Random Forest")
+lr_metrics <- collect_metrics(lr_results) |> mutate(model = "Elastic Net")
+
+comparison <- bind_rows(rf_metrics, lr_metrics) |>
+  select(model, .metric, mean, std_err)
+
+# Display the comparison
+comparison |>
+  pivot_wider(names_from = .metric, values_from = c(mean, std_err))
+```
+
+> **Question:** Which model performs better? Is the difference meaningful
+> given the standard errors?
+
+---
+
+# 6. Feature Importance and Biological Interpretation
+
+## 6.1 Extract important features
+
+```{r feature-importance}
+# Fit the final RF model on all data
+final_rf <- rf_workflow |>
+  fit(_________)
+
+# Extract and plot variable importance
+final_rf |>
+  _________________
+
+```
+
+## 6.2 Biological interpretation
+
+```{r top-genes-biology}
+# Get the top 20 gene names
+top_important <- final_rf |>
+  _____________________
+
+print(top_important)
+```
+
+> **YOUR TURN — Discussion Questions:**
+>
+> 1. Look at the top genes. Can you group them into functional categories?
+>    (Hint: look for immunoglobulin genes, cell cycle genes, and others.)
+> 2. Based on published COVID-19 literature, you might *expect* to see
+>    interferon-stimulated genes (IFI27, ISG15, MX1) at the top. Are they
+>    there? If not, why might ML importance differ from differential expression?
+>    (Hint: think about what the comparison group is — these are hospitalized
+>    non-COVID patients, not healthy controls.)
+> 3. If you see immunoglobulin genes (JCHAIN, IGLC1/2/3, IGHG1), what does
+>    this suggest about the immune response that distinguishes COVID-19 from
+>    other conditions in hospitalized patients?
+> 4. **Critical thinking:** Does ML feature importance tell you which genes
+>    are "important in COVID-19", or which genes best *discriminate between
+>    your specific classes*? Why is this distinction crucial?
+> 5. How could you validate whether these genes are biologically meaningful
+>    (beyond ML importance)?
+
+---
+
+# 7. ML Importance vs. Literature — A Critical Comparison
+
+This section is about **critical thinking**: the top ML features are often
+*not* the same genes highlighted in published papers. Understanding why is
+one of the most important lessons of this project.
+
+```{r literature-comparison}
+# These are genes consistently highlighted in COVID-19 literature
+# (based on studies comparing COVID patients vs HEALTHY controls)
+literature_genes <- c("IFI27", "ISG15", "MX1", "OAS1", "IFITM3",
+                      "CCL2", "S100A8", "S100A12", "IL1B")
+
+# Check: are they in the top 20? Top 50? Top 100? Where do they rank?
+lit_ranks <- gene_variances_clean |>
+  mutate(rank = row_number()) |>
+  filter(gene %in% literature_genes)
+
+print(lit_ranks)
+```
+
+> **Discussion — Why the discrepancy?**
+>
+> - The published literature mostly compares COVID patients to **healthy
+>   donors**. Our dataset compares COVID to **other hospitalized patients**
+>   with respiratory symptoms. The interferon response may be activated in
+>   both groups!
+> - ML importance measures **discriminative power between your specific
+>   classes**, not general "importance in disease." A gene can be critical
+>   to COVID biology yet useless for classification if both groups express
+>   it similarly.
+> - What does this teach us about interpreting ML results in biology?
+
+---
+
+# 8. Model Evaluation — ROC Curve
+
+```{r roc-curve}
+# FILL IN: Create an ROC curve for the best model
+# Hint: Use the predictions from rf_results or lr_results
+
+best_preds <- collect_predictions(rf_results)
+
+# FILL IN: Plot the ROC curve
+# Hint: roc_curve(best_preds, truth = ___, ___) |> autoplot()
+______
+```
+
+---
+
+# 9. Summary and Reflection
+
+Write a brief summary of your results (4–5 sentences):
+
+> YOUR ANSWER:
+>
+> - What accuracy / AUC did you achieve?
+> - Which model worked best?
+> - What were the most important genes?
+> - What biological conclusions can you draw?
+> - What would you do differently with more time?
+
+---
+
+# Bonus Exercises
+
+## Bonus 1: Hyperparameter Tuning
+
+Try tuning the random forest with `tune()` and `tune_grid()`.
+
+```{r bonus-tuning, eval=FALSE}
+# FILL IN: Create a tunable RF specification
+rf_tune_spec <- rand_forest(______) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+
+# FILL IN: Create the workflow and tune
+rf_tune_wf <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(rf_tune_spec)
+
+# FILL IN: Define a tuning grid and run
+# Hint: tune_grid(rf_tune_wf, resamples = cv_folds, grid = ___)
+______
+```
+
+## Bonus 2: Include Clinical Variables
+
+Try adding clinical metadata (age, sex, Charlson score) as additional features.
+
+```{r bonus-clinical, eval=FALSE}
+# Create a dataset with both gene expression and clinical features
+ml_clinical <- ml_data |>
+  select(target, all_of(top_genes), age, sex, charlson_score) |>
+  mutate(
+    age = as.numeric(age),
+    sex = factor(sex),
+    charlson_score = as.numeric(charlson_score)
+  )
+
+# FILL IN: Create a recipe that handles both numeric and categorical predictors
+# Hint: add step_dummy(all_nominal_predictors()) for the sex variable
+______
+```
+
+## Bonus 3: Compare Task A vs Task B
+
+If you have time, try both tasks and compare results. Why might one task be
+easier than the other?
+
+---
+
+*End of project notebook — good luck!*

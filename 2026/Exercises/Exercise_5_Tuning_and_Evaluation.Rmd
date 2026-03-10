@@ -1,0 +1,300 @@
+---
+title: "Exercise 5: Tuning and Final Evaluation"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2025"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+Your model from Exercise 4 used default hyperparameters. In this exercise you will
+**tune** the random forest hyperparameters to find the best configuration, then
+perform a **final evaluation** on the held-out test set, including an ROC curve and
+feature importance.
+
+**Time:** ~20 minutes
+
+**Corresponds to:** Model Improvement + Result Evaluation sections of the lecture
+
+---
+
+# 0 -- Setup and Data
+
+```{r}
+if (!require(tidymodels)) install.packages("tidymodels")
+if (!require(tidyverse))  install.packages("tidyverse")
+if (!require(ranger))     install.packages("ranger")
+if (!require(vip))        install.packages("vip")
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+
+# ---- Same simulated data as Exercises 3-4 ----
+set.seed(2025)
+n_samples <- 200; n_genes <- 50; n_de_genes <- 10
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+expression_matrix <- matrix(
+  rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+  nrow = n_samples, ncol = n_genes
+)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+gene_data <- as.data.frame(expression_matrix) |> mutate(class = sample_class)
+
+set.seed(123)
+split <- initial_split(gene_data, prop = 0.75, strata = class)
+train_data <- training(split)
+test_data  <- testing(split)
+
+# CV folds for tuning
+set.seed(42)
+cv_folds <- vfold_cv(train_data, v = 5, strata = class)
+```
+
+---
+
+# 1 -- Define a Tunable Model
+
+In tidymodels, you mark hyperparameters for tuning using `tune()` as a placeholder.
+
+### YOUR TURN 5.1
+
+Create a random forest with tunable hyperparameters:
+
+- `mtry`: Number of features randomly sampled at each split
+- `trees`: Number of trees in the forest
+- `min_n`: Minimum number of samples in a leaf node
+
+```{r}
+rf_tunable <- rand_forest(
+  mtry  = ___,
+  trees = ___,
+  min_n = ___
+) |>
+  set_mode("classification") |>
+  set_engine("ranger", importance = "impurity")
+```
+
+---
+
+# 2 -- Create a Tuning Grid
+
+A grid defines which hyperparameter combinations to try.
+
+### YOUR TURN 5.2
+
+Create a regular grid. We limit mtry to between 3 and 20, trees to a few options,
+and min_n to small values.
+
+```{r}
+rf_grid <- grid_regular(
+  mtry(range = c(3, 20)),
+  trees(range = c(200, 800)),
+  min_n(range = c(2, 10)),
+  levels = ___
+)
+
+cat("Number of combinations to try:", nrow(rf_grid), "\n")
+rf_grid
+```
+
+---
+
+# 3 -- Run the Tuning
+
+### YOUR TURN 5.3
+
+Create a workflow and run `tune_grid()` to evaluate all combinations across CV folds.
+
+```{r}
+rf_wf <- workflow() |>
+  add_recipe(recipe(class ~ ., data = train_data)) |>
+  add_model(___)
+
+tune_results <- rf_wf |>
+  tune_grid(
+    resamples = ___,
+    grid      = ___,
+    metrics   = metric_set(accuracy, f_meas, roc_auc)
+  )
+```
+
+> **Note:** This may take 30-60 seconds depending on your computer.
+
+---
+
+# 4 -- Inspect the Tuning Results
+
+### YOUR TURN 5.4
+
+View the top 5 hyperparameter combinations ranked by F1 score.
+
+```{r}
+tune_results |>
+  show_best(metric = "___", n = 5)
+```
+
+### YOUR TURN 5.5
+
+Visualize how performance changes with different hyperparameter values.
+
+```{r}
+autoplot(tune_results, metric = "f_meas")
+```
+
+**Discussion:** Which hyperparameter seems to matter most? Does performance
+plateau after a certain number of trees?
+
+---
+
+# 5 -- Select the Best Model and Finalize
+
+### YOUR TURN 5.6
+
+Select the best hyperparameters and finalize the workflow.
+
+```{r}
+best_params <- tune_results |>
+  select_best(metric = "___")
+
+cat("Best hyperparameters:\n")
+best_params
+
+# Finalize the workflow with the best parameters
+final_wf <- rf_wf |>
+  finalize_workflow(___)
+```
+
+---
+
+# 6 -- Final Evaluation on the Test Set
+
+Now we train the finalized model on ALL training data and evaluate on the held-out
+test set that the model has never seen.
+
+### YOUR TURN 5.7
+
+Use `last_fit()` to do the final train + evaluate in one step.
+
+```{r}
+final_fit <- final_wf |>
+  last_fit(split = ___)
+
+# View test set metrics
+final_fit |> collect_metrics()
+```
+
+> **CHECKPOINT:** Test set accuracy should be in the range of 0.80 to 0.95.
+
+---
+
+# 7 -- ROC Curve
+
+### YOUR TURN 5.8
+
+Plot the ROC curve on the test set.
+
+```{r}
+test_predictions <- final_fit |> collect_predictions()
+
+test_predictions |>
+  roc_curve(truth = ___, .pred_normal) |>
+  autoplot() +
+  labs(title = "ROC Curve on Test Set")
+```
+
+### YOUR TURN 5.9
+
+Create a confusion matrix for the test set.
+
+```{r}
+test_predictions |>
+  conf_mat(truth = ___, estimate = ___)
+```
+
+---
+
+# 8 -- Feature Importance
+
+Random forests tell you which features (genes) contributed most to predictions.
+
+### YOUR TURN 5.10
+
+Extract the fitted model and plot feature importance for the top 15 genes.
+
+```{r}
+final_model <- final_fit |>
+  extract_fit_parsnip()
+
+final_model |>
+  vip(num_features = ___) +
+  theme_minimal() +
+  labs(title = "Top Features (Genes) by Importance")
+```
+
+> **CHECKPOINT:** The top features should mostly be gene_1 through gene_10 (the truly
+> differentially expressed ones). If noise genes appear in the top 10, the model
+> might be picking up on random patterns.
+
+**Discussion questions:**
+
+1. Do the most important genes match the truly DE genes (gene_1 to gene_10)?
+   What does it mean if a noise gene appears as important?
+
+2. We used `importance = "impurity"` (Gini importance). The handout describes
+   permutation importance. What is the difference?
+
+3. In a real experiment, you would not know which genes are truly informative.
+   How could you use feature importance to generate biological hypotheses?
+
+4. We tuned 27 combinations. Would 1000 always give a better model?
+   What are the risks?
+
+---
+
+# Summary
+
+You practiced:
+
+- Marking hyperparameters for tuning with `tune()`
+- Creating tuning grids with `grid_regular()`
+- Running hyperparameter search with `tune_grid()`
+- Selecting the best model with `select_best()` and `finalize_workflow()`
+- Final evaluation with `last_fit()`
+- Plotting ROC curves and confusion matrices
+- Extracting and interpreting feature importance with `vip()`
+
+**Key takeaway:** The full ML pipeline is: split data, define model, set up CV, tune
+hyperparameters, select best, evaluate ONCE on test set, interpret results.
+The test set is only used at the very end.
+
+---
+
+# Hints
+
+- 5.1: Replace each `___` with `tune()`.
+- 5.2: Use `levels = 3`. This creates 3 x 3 x 3 = 27 combinations.
+- 5.3: Add `rf_tunable`. Use `cv_folds` and `rf_grid`.
+- 5.4: Use `f_meas` (this is F1 score in tidymodels).
+- 5.6: Metric is `f_meas`. Pass `best_params` to `finalize_workflow()`.
+- 5.7: Pass the original `split` object (not `cv_folds`).
+- 5.8: truth = `class`.
+- 5.9: truth = `class`, estimate = `.pred_class`.
+- 5.10: Use `15` for num_features.
+
+---
+
+*Next up: Bonus Exercise -- Spot the Leakage*

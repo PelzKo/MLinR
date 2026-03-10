@@ -1,0 +1,232 @@
+---
+title: "Exercise 1: Meet Your Data"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+In this first exercise, you will practice the basic R skills needed for the rest of the course:
+loading data, exploring its structure, and creating simple visualizations. We use the
+**Palmer Penguins** dataset -- morphological measurements of three penguin species
+collected on islands near Antarctica.
+
+**Time:** ~15 minutes
+
+**Corresponds to:** Introduction and Data section of the lecture
+
+---
+
+# 0 -- Setup
+
+Run this cell to load the required packages. If a package is missing, the code will install it
+automatically.
+
+```{r}
+if (!require(palmerpenguins)) install.packages("palmerpenguins")
+if (!require(tidyverse))      install.packages("tidyverse")
+
+library(palmerpenguins)
+library(tidyverse)
+```
+
+# 1 -- Load and Inspect the Data
+
+The `palmerpenguins` package provides a data frame called `penguins`. Let us get a first
+look at it.
+
+```{r}
+# This loads the data into your environment
+data("penguins")
+```
+
+### YOUR TURN 1.1
+
+Use the functions `dim()`, `head()`, and `summary()` to explore the penguins dataset.
+Fill in the blanks (replace `___`).
+
+```{r}
+# How many rows and columns does the dataset have?
+dim(___)
+
+# Show the first 6 rows
+head(___)
+
+# Get a statistical summary of each column
+summary(___)
+```
+
+> **CHECKPOINT:** You should see that the dataset has **344 rows** and **8 columns**. The
+> columns include `species`, `island`, `bill_length_mm`, `bill_depth_mm`,
+> `flipper_length_mm`, `body_mass_g`, `sex`, and `year`.
+
+### YOUR TURN 1.2
+
+Use `str()` to see the data types of each column. This is important because ML models
+treat numeric and categorical (factor) variables differently.
+
+```{r}
+str(___)
+```
+
+**Discussion question:** Which columns are numeric? Which are categorical? Which column
+could be a *target variable* (something you would want to predict)?
+
+---
+
+# 2 -- Handling Missing Data
+
+Real-world datasets almost always contain missing values. Let us check.
+
+```{r}
+# Count missing values per column
+colSums(is.na(penguins))
+```
+
+### YOUR TURN 1.3
+
+Remove rows with missing values using `drop_na()` and store the result in a new variable
+called `penguins_clean`. Then check how many rows remain.
+
+```{r}
+penguins_clean <- penguins |>
+  ___()
+
+# How many rows are left?
+dim(penguins_clean)
+```
+
+> **CHECKPOINT:** You should have **333 rows** remaining.
+
+---
+
+# 3 -- Basic Data Manipulation with dplyr
+
+The `tidyverse` provides powerful tools for data manipulation. The pipe operator `|>`
+chains operations together: the output of one step becomes the input of the next.
+
+### YOUR TURN 1.4
+
+Count how many penguins of each species are in the cleaned dataset. Fill in the blank
+with the correct column name.
+
+```{r}
+penguins_clean |>
+  count(___)
+```
+
+> **CHECKPOINT:** Adelie: 146, Chinstrap: 68, Gentoo: 119.
+
+### YOUR TURN 1.5
+
+Use `group_by()` and `summarize()` to calculate the mean body mass for each species.
+
+```{r}
+penguins_clean |>
+  group_by(___) |>
+  summarize(mean_mass = mean(___))
+```
+
+---
+
+# 4 -- Visualization with ggplot2
+
+Visualizing data before modeling is essential. ggplot2 works in layers:
+`ggplot(data, aes(x, y))` sets up the canvas, then you add geometries like `geom_point()`.
+
+### YOUR TURN 1.6
+
+Create a bar chart showing the number of penguins per species. Fill in the correct
+geometry function.
+
+```{r}
+ggplot(penguins_clean, aes(x = species, fill = species)) +
+  ___() +
+  theme_minimal() +
+  labs(title = "Number of Penguins per Species",
+       x = "Species", y = "Count")
+```
+
+### YOUR TURN 1.7
+
+Create a scatter plot of bill length vs. bill depth, colored by species. This shows whether
+the species form distinct clusters in this feature space.
+
+```{r}
+ggplot(penguins_clean, aes(x = ___, y = ___, color = species)) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  labs(title = "Bill Dimensions by Species",
+       x = "Bill Length (mm)", y = "Bill Depth (mm)")
+```
+
+### YOUR TURN 1.8 (Stretch Goal)
+
+Create a boxplot of flipper length by species. Boxplots show the distribution (median,
+quartiles, outliers) and are useful for comparing groups.
+
+```{r}
+ggplot(penguins_clean, aes(x = ___, y = ___, fill = ___)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Flipper Length by Species",
+       x = "Species", y = "Flipper Length (mm)")
+```
+
+---
+
+# 5 -- Thinking Like a Data Scientist
+
+Before applying machine learning, we need to think about our data in ML terms.
+
+**Discussion questions (no code needed):**
+
+1. If we wanted to predict the **species** of a penguin from its measurements, which columns
+   would be the **features** (inputs) and which would be the **target** (output)?
+
+2. Is this a **classification** or a **regression** problem? Why?
+
+3. Looking at your scatter plot from 1.7: do you think a machine learning model could
+   separate the three species? Which species pair might be hardest to distinguish?
+
+4. We have 333 samples. Is this a lot or a little for ML? What if we had 33,000 genes
+   instead of 4 numeric features?
+
+---
+
+# Summary
+
+In this exercise you practiced:
+
+- Loading and inspecting data with `dim()`, `head()`, `summary()`, `str()`
+- Handling missing values with `drop_na()`
+- Data manipulation with `count()`, `group_by()`, `summarize()`
+- Visualization with `ggplot2`: bar charts, scatter plots, boxplots
+- The pipe operator `|>` for chaining operations
+
+These are the same tools you will use for the rest of the course -- just with more complex
+data and ML-specific functions on top.
+
+---
+
+# Hints
+
+- 1.3: The function is `drop_na` and it goes inside the pipe.
+- 1.5: Group by `species`, summarize with `body_mass_g`.
+- 1.6: The geometry for bar charts is `geom_bar`
+- 1.7: Use `bill_length_mm` for x and `bill_depth_mm` for y.
+
+---
+
+*Next up: Exercise 2 -- Unsupervised Exploration (PCA and clustering)*

@@ -1,0 +1,216 @@
+---
+title: "Exercise 2: Unsupervised Exploration"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+You will run **PCA** and **k-means clustering** on the Palmer Penguins data, then evaluate
+how well these unsupervised methods recover the known species labels -- without
+ever telling the algorithm which species each penguin belongs to.
+
+**Time:** ~15 minutes
+
+**Corresponds to:** Unsupervised Learning section of the lecture
+
+---
+
+# 0 -- Setup
+
+```{r}
+if (!require(palmerpenguins)) install.packages("palmerpenguins")
+if (!require(tidyverse))      install.packages("tidyverse")
+
+library(palmerpenguins)
+library(tidyverse)
+
+# Prepare clean data (same as Exercise 1)
+penguins_clean <- penguins |>
+  drop_na() |>
+  select(species, bill_length_mm, bill_depth_mm, flipper_length_mm, body_mass_g)
+```
+
+# 1 -- Principal Component Analysis (PCA)
+
+PCA reduces high-dimensional data to a few components that capture the most variance.
+Before running PCA, we need to select only the **numeric** columns and **scale** them
+(so features measured in different units are comparable).
+
+### YOUR TURN 2.1
+
+Select only the numeric columns and run PCA with `prcomp()`. The arguments `center`
+and `scale.` ensure that each feature is standardized before the analysis.
+
+```{r}
+# Select only numeric columns (remove species)
+penguins_numeric <- penguins_clean |>
+  select(-___)
+
+# Run PCA
+pca_result <- prcomp(penguins_numeric, center = TRUE, scale. = ___)
+```
+
+### YOUR TURN 2.2
+
+Check how much variance each principal component explains using `summary()`.
+
+```{r}
+summary(___)
+```
+
+> **CHECKPOINT:** PC1 should explain roughly **69%** of the total variance, and PC1 + PC2
+> together should explain roughly **88%**.
+
+**Discussion:** Why is it useful to know how much variance each PC captures?
+
+---
+
+# 2 -- Visualize PCA Results
+
+Now let us plot the first two PCs and color the points by their known species label.
+
+### YOUR TURN 2.3
+
+Complete the code to create a PCA scatter plot.
+
+```{r}
+# Extract PC scores and combine with species labels
+pca_data <- data.frame(
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  species = penguins_clean$species
+)
+
+# Create the scatter plot
+ggplot(pca_data, aes(x = ___, y = ___, color = ___)) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  labs(title = "PCA of Penguin Measurements",
+       x = paste0("PC1 (", round(summary(pca_result)$importance[2, 1] * 100, 1), "% variance)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2, 2] * 100, 1), "% variance)"))
+```
+
+**Discussion:** Do the species form distinct groups in PC space? Which species is most
+separated from the others?
+
+---
+
+# 3 -- K-Means Clustering
+
+K-means groups data points into *k* clusters based on their similarity (distance).
+The algorithm does NOT know the true species labels.
+
+### YOUR TURN 2.4
+
+Run k-means with k=3 (because we know there are 3 species).
+
+```{r}
+set.seed(42)  # For reproducibility
+
+kmeans_result <- kmeans(
+  scale(penguins_numeric),  # Scale the data
+  centers = ___,            # Number of clusters
+  nstart = 25               # Run 25 times, keep best
+)
+```
+
+### YOUR TURN 2.5
+
+Visualize the k-means clusters on the PCA plot and compare them to the true species.
+
+```{r}
+pca_data$cluster <- as.factor(kmeans_result$cluster)
+
+# Plot clusters
+ggplot(pca_data, aes(x = PC1, y = PC2, color = ___, shape = species)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  theme_minimal() +
+  labs(title = "K-Means Clusters vs. True Species",
+       color = "Cluster", shape = "True Species")
+```
+
+---
+
+# 4 -- Evaluate the Clustering
+
+### YOUR TURN 2.6
+
+Create a confusion-style table to see how well the clusters match the true species.
+
+```{r}
+table(True_Species = penguins_clean$___, Cluster = kmeans_result$___)
+```
+
+> **CHECKPOINT:** One cluster should map almost perfectly to Gentoo, while
+> Adelie and Chinstrap are mostly separated but with some mixing.
+
+---
+
+# 5 -- What Happens with the Wrong k?
+
+### YOUR TURN 2.7
+
+Run k-means with k=2 instead and visualize the result.
+
+```{r}
+set.seed(42)
+kmeans_k2 <- kmeans(scale(penguins_numeric), centers = ___, nstart = 25)
+
+pca_data$cluster_k2 <- as.factor(kmeans_k2$cluster)
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster_k2, shape = species)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  theme_minimal() +
+  labs(title = "K-Means with k=2 vs. True Species",
+       color = "Cluster", shape = "True Species")
+```
+
+**Discussion questions:**
+
+1. Which two species got merged into one cluster? Does this make sense from the PCA?
+
+2. In a real scenario where you do NOT know the true labels, how would you decide
+   the right value of k? (Hint: think about the silhouette score from the lecture.)
+
+3. This dataset has only 4 features. In transcriptomics, you might have 20,000 genes.
+   Would PCA be more or less useful in that setting? Why?
+
+---
+
+# Summary
+
+You practiced:
+
+- Running PCA with `prcomp()` and interpreting variance explained
+- Visualizing data in reduced dimensions (PC1 vs PC2)
+- Running k-means with `kmeans()` and varying k
+- Comparing unsupervised clusters to known labels
+- The importance of scaling data before distance-based methods
+
+**Key takeaway:** Unsupervised methods can discover real biological structure in data,
+but they do not guarantee that the clusters match your categories of interest.
+
+---
+
+# Hints
+
+- 2.1: Remove the `species` column. Set `scale.` to `TRUE`.
+- 2.3: x = `PC1`, y = `PC2`, color = `species`.
+- 2.4: We want 3 clusters to match the 3 species.
+- 2.5: Color by `cluster` to see the k-means result; shape by species to compare.
+- 2.6: Use `species` from the data and `cluster` from the k-means result.
+
+---
+
+*Next up: Exercise 3 -- Your First Classifier*

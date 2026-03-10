@@ -1,0 +1,258 @@
+---
+title: "Exercise 3: Your First Classifier"
+subtitle: "Machine Learning with R in the Life Sciences"
+author: "Konstantin Pelz, Prof. Dr. Markus List"
+date: "2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goal
+
+You will split data into training and test sets, train your first classifier using
+**tidymodels**, make predictions, and evaluate the result with a confusion matrix.
+We switch to a **simulated transcriptomics** dataset: classifying tumor vs. normal
+samples from gene expression data.
+
+**Time:** ~20 minutes
+
+**Corresponds to:** Supervised Learning + Data Splitting sections of the lecture
+
+---
+
+# 0 -- Setup
+
+```{r}
+if (!require(tidymodels)) install.packages("tidymodels")
+if (!require(tidyverse))  install.packages("tidyverse")
+
+library(tidyverse)
+library(tidymodels)
+```
+
+# 1 -- Generate a Simulated Transcriptomics Dataset
+
+In practice, you would load data from GEO or a similar repository. Here, we simulate
+a gene expression dataset with 200 samples and 50 genes. Some genes are
+differentially expressed between tumor and normal tissue.
+
+**You do not need to change anything here** -- just run the cell and read the comments.
+
+```{r}
+set.seed(2025)
+
+n_samples <- 200
+n_genes   <- 50
+n_de_genes <- 10  # 10 genes are truly differentially expressed
+
+# Create sample labels
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+
+# Simulate gene expression: most genes are random noise
+expression_matrix <- matrix(
+  rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+  nrow = n_samples, ncol = n_genes
+)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+
+# Make the first n_de_genes differentially expressed
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+
+# Combine into a data frame
+gene_data <- as.data.frame(expression_matrix) |>
+  mutate(class = sample_class)
+
+cat("Dataset dimensions:", dim(gene_data), "\n")
+cat("Class distribution:\n")
+table(gene_data$class)
+```
+
+### YOUR TURN 3.1
+
+Explore the data. Create a boxplot comparing expression of `gene_1` (differentially
+expressed) between tumor and normal. Then do the same for `gene_40` (not DE).
+
+```{r}
+# Differentially expressed gene
+ggplot(gene_data, aes(x = class, y = ___, fill = class)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Gene 1 (Differentially Expressed)")
+```
+
+```{r}
+# Non-differentially expressed gene
+ggplot(gene_data, aes(x = class, y = ___, fill = class)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Gene 40 (Not Differentially Expressed)")
+```
+
+**Discussion:** Can you visually see the difference in gene_1? What about gene_40?
+
+---
+
+# 2 -- Split the Data
+
+We need to split our data into **training** (to learn from) and **test** (to evaluate on).
+The test set must remain untouched until the very end.
+
+### YOUR TURN 3.2
+
+Use `initial_split()` to create a 75/25 split. The `strata` argument ensures that both
+sets have the same proportion of tumor and normal samples.
+
+```{r}
+set.seed(123)
+
+split <- initial_split(
+  data   = gene_data,
+  prop   = ___,
+  strata = ___
+)
+
+train_data <- training(split)
+test_data  <- testing(split)
+
+cat("Training samples:", nrow(train_data), "\n")
+cat("Test samples:", nrow(test_data), "\n")
+cat("\nTraining class distribution:\n")
+table(train_data$class)
+```
+
+> **CHECKPOINT:** Training should have 150 samples, test should have 50.
+
+---
+
+# 3 -- Define a Model
+
+We train a **logistic regression** -- simple, fast, and interpretable.
+
+### YOUR TURN 3.3
+
+Complete the model specification. We want classification mode.
+
+```{r}
+log_reg_spec <- logistic_reg() |>
+  set_mode("___") |>
+  set_engine("glm")
+```
+
+---
+
+# 4 -- Create a Workflow and Train
+
+A **workflow** bundles the preprocessing (recipe) and the model together.
+
+### YOUR TURN 3.4
+
+Create a recipe, combine with the model, and fit to training data.
+
+```{r}
+# Recipe: predict class from everything else
+train_recipe <- recipe(___ ~ ., data = train_data)
+
+# Workflow: combine recipe + model
+wf <- workflow() |>
+  add_recipe(___) |>
+  add_model(___)
+
+# Fit to training data
+fitted_model <- wf |>
+  fit(data = ___)
+
+fitted_model
+```
+
+---
+
+# 5 -- Predict on the Test Set
+
+### YOUR TURN 3.5
+
+Use the fitted model to make predictions on the test data.
+
+```{r}
+predictions <- fitted_model |>
+  predict(new_data = ___) |>
+  bind_cols(test_data |> select(class))
+
+head(predictions)
+```
+
+---
+
+# 6 -- Evaluate with a Confusion Matrix
+
+### YOUR TURN 3.6
+
+Create a confusion matrix to see how many samples were correctly classified.
+
+```{r}
+conf_mat(predictions, truth = ___, estimate = ___)
+```
+
+### YOUR TURN 3.7
+
+Calculate accuracy and balanced accuracy.
+
+```{r}
+metrics_result <- predictions |>
+  metrics(truth = class, estimate = .pred_class)
+
+metrics_result
+```
+
+> **CHECKPOINT:** Your accuracy should be approximately **85-95%**. If it is much lower,
+> check that you used the correct column names.
+
+**Discussion questions:**
+
+1. Is accuracy alone sufficient to judge this model? What if the dataset were 95%
+   normal and 5% tumor?
+
+2. Looking at the confusion matrix: does the model make more false positives or
+   false negatives? Which error is worse in a clinical screening context?
+
+3. We used ALL 50 genes as features. Some are just noise. Would the model
+   perform better with fewer, carefully selected genes?
+
+---
+
+# Summary
+
+You practiced:
+
+- Splitting data with `initial_split()` and stratification
+- Defining a model with `logistic_reg()` and `set_mode()`
+- Creating workflows with `recipe()`, `workflow()`, `add_recipe()`, `add_model()`
+- Fitting, predicting, and evaluating
+- The tidymodels pattern: recipe + model + workflow + fit + predict + evaluate
+
+**Key takeaway:** This workflow pattern is the same for ANY model. Only the model
+specification changes.
+
+---
+
+# Hints
+
+- 3.1: Use `gene_1` and `gene_40` for the y-axis.
+- 3.2: Use `prop = 0.75` and `strata = class`.
+- 3.3: The mode is `classification` (not regression).
+- 3.4: The target is `class`. Add `train_recipe` and `log_reg_spec` to the workflow. Fit on `train_data`.
+- 3.5: Predict on `test_data`.
+- 3.6: truth = `class`, estimate = `.pred_class`.
+
+---
+
+*Next up: Exercise 4 -- Model Comparison with Cross-Validation*
