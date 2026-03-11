@@ -1,0 +1,61 @@
+---
+title: "Bonus Exercise: Spot the Leakage -- SOLUTIONS"
+subtitle: Machine Learning with R in the Life Sciences
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### B.1
+
+**Version A contains data leakage.** When you call `scale()` on the entire dataset
+before splitting, the mean and standard deviation used for normalization are computed
+from ALL samples -- including those that will end up in the test set. This means the
+training data has been influenced by information from the test set.
+
+### B.2
+
+`scale()` computes the column mean and standard deviation. In Version A, these
+statistics include test set values. So every scaled training value is slightly shifted
+by information from samples that should be unknown during training. In Version B,
+the recipe computes the mean and SD from the training data only, and applies
+those same statistics to normalize the test data. This is the correct approach.
+
+### B.3
+
+**Version A contains data leakage.** The t-tests for feature selection are run on the
+entire training set BEFORE cross-validation. This means every CV fold's training
+partition already benefits from having seen information from its validation partition
+(through the feature selection step). The selected genes are biased toward being
+good predictors on this specific dataset, inflating CV performance.
+
+### B.4
+
+When published, the paper would report a specific gene set and a performance
+estimate. But that gene set was selected using information that will not be
+available for new data. On a completely independent cohort, the selected genes
+may not be informative, and the reported performance will not be reproducible.
+This is a major contributor to the replication crisis in ML-based biology studies.
+
+### B.5
+
+The dataset contains **confounding variables** that are perfectly correlated with
+the class label: `batch` (tumor = batch_1, normal = batch_2) and
+`measurement_time` (tumor = morning, normal = afternoon). A model can achieve
+near-perfect accuracy by simply learning "batch_1 = tumor" or "morning = tumor"
+without learning anything about the actual gene expression patterns. On new data
+collected without this batch structure, the model would fail completely.
+
+### B.6
+
+1. **Batch ID** (batch_1 vs batch_2) -- directly encodes the class label
+2. **Measurement time** (morning vs afternoon) -- acts as a proxy for the label
+
+Both are technical artifacts, not biological signals.

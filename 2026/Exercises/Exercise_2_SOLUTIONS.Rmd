@@ -1,0 +1,167 @@
+---
+title: "Exercise 2: Unsupervised Exploration -- SOLUTIONS"
+subtitle: Machine Learning with R in the Life Sciences
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Setup
+
+```{r}
+library(palmerpenguins)
+library(tidyverse)
+penguins_clean <- penguins |>
+  drop_na() |>
+  select(species, bill_length_mm, bill_depth_mm, flipper_length_mm, body_mass_g)
+```
+
+### 2.1
+```{r}
+penguins_numeric <- penguins_clean |>
+  select(-species)
+pca_result <- prcomp(penguins_numeric, center = TRUE, scale. = TRUE)
+```
+
+### 2.2
+```{r}
+summary(pca_result)
+```
+
+**Q: Why is it useful to know how much variance each PC captures?**
+
+The variance explained by each PC tells you **how much information** that component
+carries. If PC1 captures 69% and PC2 captures 19% of the total variance, then a 2D
+scatter plot of PC1 vs. PC2 represents about 88% of the total variation in the data —
+meaning you are getting a faithful low-dimensional summary with very little
+information loss.
+
+This matters for several practical reasons:
+
+- **Deciding how many PCs to keep:** If the first 3 PCs explain 95% of variance, the
+  remaining PCs mostly capture noise and can be discarded. If you need 50 PCs to
+  reach 80%, the data has many independent dimensions and is harder to compress.
+- **Interpreting plots:** A PCA plot where PC1 + PC2 explain 90% of variance is
+  trustworthy — the clusters you see are real. A plot where they explain only 15% is
+  misleading — important structure may be hidden in higher PCs.
+- **As a preprocessing step:** When using PCA for dimensionality reduction before ML
+  (e.g., `step_pca(num_comp = 10)`), the variance explained helps you choose how
+  many components to retain so you keep enough signal without flooding the model
+  with noise dimensions.
+
+**Q: Do the species form distinct groups in PC space? Which species is most separated from the others?**
+
+Yes, the species form distinct groups. **Gentoo** is most clearly separated from the
+others, sitting apart along PC1. This is because Gentoo penguins are substantially
+larger (higher body mass and flipper length) than both Adelie and Chinstrap, and
+PC1 primarily captures this size axis — it is the dominant source of variation in the
+data.
+
+Adelie and Chinstrap overlap more in PC space, particularly along PC1, though they
+begin to separate along PC2 (which captures more of the bill shape differences).
+This tells us that a classifier would easily distinguish Gentoo from the other species,
+but would need to rely on subtler feature differences (bill dimensions) to tell Adelie
+and Chinstrap apart.
+
+### 2.3
+```{r}
+pca_data <- data.frame(
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  species = penguins_clean$species
+)
+ggplot(pca_data, aes(x = PC1, y = PC2, color = species)) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  labs(title = "PCA of Penguin Measurements",
+       x = paste0("PC1 (", round(summary(pca_result)$importance[2, 1] * 100, 1), "% variance)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2, 2] * 100, 1), "% variance)"))
+```
+
+### 2.4
+```{r}
+set.seed(42)
+kmeans_result <- kmeans(scale(penguins_numeric), centers = 3, nstart = 25)
+```
+
+### 2.5
+```{r}
+pca_data$cluster <- as.factor(kmeans_result$cluster)
+ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster, shape = species)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  theme_minimal() +
+  labs(title = "K-Means Clusters vs. True Species", color = "Cluster", shape = "True Species")
+```
+
+### 2.6
+```{r}
+table(True_Species = penguins_clean$species, Cluster = kmeans_result$cluster)
+```
+
+### 2.7
+```{r}
+set.seed(42)
+kmeans_k2 <- kmeans(scale(penguins_numeric), centers = 2, nstart = 25)
+pca_data$cluster_k2 <- as.factor(kmeans_k2$cluster)
+ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster_k2, shape = species)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  theme_minimal() +
+  labs(title = "K-Means with k=2 vs. True Species", color = "Cluster", shape = "True Species")
+```
+
+### Discussion Questions — Solutions
+
+**Q1: Which two species got merged into one cluster? Does this make sense from the PCA?**
+
+With k = 2, **Adelie and Chinstrap** get merged into a single cluster, while Gentoo
+forms its own cluster. This makes sense from the PCA plot: Gentoo penguins are
+clearly separated along PC1 (driven mainly by body mass and flipper length),
+whereas Adelie and Chinstrap overlap considerably in the principal component space.
+
+K-means with k = 2 picks up the most dominant split in the data (Gentoo vs. the
+rest). This is a useful lesson: unsupervised methods find the strongest structure in
+the data, which does not always align with the biological labels you care about.
+
+**Q2: In a real scenario where you do NOT know the true labels, how would you decide the right value of k?**
+
+Without known labels you can use the **silhouette score** (covered in the lecture).
+For each value of k (e.g., 2 through 10), compute the average silhouette width,
+which measures how similar each point is to its own cluster compared to the nearest
+neighboring cluster. The k with the highest average silhouette score is typically a
+good choice.
+
+Other approaches include:
+
+- **Elbow method:** Plot total within-cluster sum of squares vs. k, look for a "bend."
+- **Gap statistic:** Compares within-cluster dispersion to a null reference distribution.
+
+In this penguin dataset, k = 2 will likely have the highest silhouette score because
+the Gentoo-vs.-rest split is so clean, even though biologically we know k = 3 is
+"correct." This highlights an important point: unsupervised methods tell you about
+data structure, not necessarily biological truth.
+
+**Q3: This dataset has only 4 features. In transcriptomics, you might have 20,000 genes. Would PCA be more or less useful in that setting? Why?**
+
+PCA becomes **much more useful** in high-dimensional settings. With 20,000 genes
+you cannot visualize the data directly, and many genes are correlated (e.g.,
+co-regulated in the same pathway). PCA compresses this information into a small
+number of principal components that capture the dominant variation.
+
+Typically, the first 2–3 PCs already reveal major structure (e.g., tumor vs. normal,
+batch effects, tissue type). In practice, PCA is one of the first things
+bioinformaticians run on any new omics dataset — it serves as a quality check:
+
+- Do replicates cluster together?
+- Are there outliers?
+- Are there batch effects?
+
+Additionally, you can use PCA as a preprocessing step for ML
+(`step_pca()` in tidymodels), feeding 10–50 PCs into a model instead of 20,000 raw
+features.

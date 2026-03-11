@@ -1,0 +1,155 @@
+---
+title: "Exercise 1: Meet Your Data -- SOLUTIONS"
+subtitle: Machine Learning with R in the Life Sciences
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Setup
+
+```{r}
+library(palmerpenguins)
+library(tidyverse)
+data("penguins")
+```
+
+### 1.1
+```{r}
+dim(penguins)
+head(penguins)
+summary(penguins)
+```
+
+### 1.2
+```{r}
+str(penguins)
+```
+
+**Q: Which columns are numeric? Which are categorical? Which column could be a target variable (something you would want to predict)?**
+
+**Numeric columns:** `bill_length_mm`, `bill_depth_mm`, `flipper_length_mm`,
+`body_mass_g`, and `year` (technically numeric but functions as a categorical
+grouping variable here — there are only 3 unique years).
+
+**Categorical columns:** `species`, `island`, and `sex`.
+
+You can verify this with `str(penguins)` — numeric columns show as `num` or `int`,
+categorical ones as `fct` (factor).
+
+**Target variable:** The most natural target is `species` — predicting which species a
+penguin belongs to based on its body measurements. This is a classification task
+with three classes.
+
+Other valid targets depending on the research question:
+
+- `sex` — predicting sex from morphology (binary classification)
+- `body_mass_g` — predicting body mass from the other measurements (regression)
+- `island` — predicting island of origin (classification, though this is partly
+  confounded with species)
+
+The choice of target depends on the scientific question. In ML terms, the target is
+always the column you want to predict, and everything else becomes a candidate
+feature.
+
+### 1.3
+```{r}
+penguins_clean <- penguins |>
+  drop_na()
+dim(penguins_clean)
+```
+
+### 1.4
+```{r}
+penguins_clean |>
+  count(species)
+```
+
+### 1.5
+```{r}
+penguins_clean |>
+  group_by(species) |>
+  summarize(mean_mass = mean(body_mass_g))
+```
+
+### 1.6
+```{r}
+ggplot(penguins_clean, aes(x = species, fill = species)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Number of Penguins per Species", x = "Species", y = "Count")
+```
+
+### 1.7
+```{r}
+ggplot(penguins_clean, aes(x = bill_length_mm, y = bill_depth_mm, color = species)) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  labs(title = "Bill Dimensions by Species", x = "Bill Length (mm)", y = "Bill Depth (mm)")
+```
+
+### 1.8
+```{r}
+ggplot(penguins_clean, aes(x = species, y = flipper_length_mm, fill = species)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Flipper Length by Species", x = "Species", y = "Flipper Length (mm)")
+```
+
+### Discussion Questions — Solutions
+
+**Q1: If we wanted to predict the species of a penguin from its measurements, which columns would be the features (inputs) and which would be the target (output)?**
+
+The **target** (output) is the `species` column — that is what we want to predict.
+The **features** (inputs) are the four numeric measurement columns:
+`bill_length_mm`, `bill_depth_mm`, `flipper_length_mm`, and `body_mass_g`.
+
+The columns `island`, `sex`, and `year` could also serve as features, but they are
+categorical and would require encoding. For a first ML exercise we focus on the
+numeric measurements because they directly describe the penguin's morphology
+and are biologically meaningful for distinguishing species.
+
+**Q2: Is this a classification or a regression problem? Why?**
+
+This is a **classification** problem because the target variable `species` is
+categorical (Adelie, Chinstrap, Gentoo) — we are predicting a discrete class label,
+not a continuous number. If we were instead predicting `body_mass_g` from the
+other measurements, *that* would be a regression problem.
+
+**Q3: Looking at your scatter plot from 1.7: do you think a machine learning model could separate the three species? Which species pair might be hardest to distinguish?**
+
+Yes. The scatter plot of `bill_length_mm` vs. `bill_depth_mm` shows that the three
+species form relatively distinct clusters, so an ML model should be able to separate
+them reasonably well.
+
+**Adelie and Chinstrap** are the hardest pair to distinguish — they overlap
+substantially in bill depth and have adjacent ranges in bill length. Gentoo penguins
+form a clearly separated group (lower bill depth, higher bill length), making them
+the easiest to identify.
+
+This illustrates why we often need multiple features: adding flipper length and body
+mass would help separate Adelie from Chinstrap further.
+
+**Q4: We have 333 samples. Is this a lot or a little for ML? What if we had 33,000 genes instead of 4 numeric features?**
+
+For 4 numeric features, 333 samples is quite reasonable — a common rule of thumb
+is at least 10–20 observations per feature, and we far exceed that.
+
+However, if we had **33,000 genes** instead of 4 features, the situation reverses
+dramatically: we would have far more features than samples (p >> n). This is the
+**curse of dimensionality** — the model has too many degrees of freedom relative to
+the data and will overfit to noise. In that high-dimensional setting we would need:
+
+- Feature selection (e.g., variance filtering, selecting only DE genes)
+- Dimensionality reduction (PCA)
+- Regularized models (Lasso, Elastic Net)
+
+This p >> n scenario is extremely common in transcriptomics, proteomics, and other
+omics data.

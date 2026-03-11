@@ -1,0 +1,174 @@
+---
+title: "Exercise 4: Model Comparison -- SOLUTIONS"
+subtitle: Machine Learning with R in the Life Sciences
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Setup
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+set.seed(2025)
+n_samples <- 200; n_genes <- 50; n_de_genes <- 10
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+expression_matrix <- matrix(rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+                            nrow = n_samples, ncol = n_genes)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+gene_data <- as.data.frame(expression_matrix) |> mutate(class = sample_class)
+
+set.seed(123)
+split <- initial_split(gene_data, prop = 0.75, strata = class)
+train_data <- training(split)
+test_data  <- testing(split)
+```
+
+### 4.1
+```{r}
+set.seed(42)
+cv_folds <- vfold_cv(data = train_data, v = 5, strata = class)
+cv_folds
+```
+
+### 4.2
+```{r}
+logreg_spec <- logistic_reg() |> set_mode("classification") |> set_engine("glm")
+rf_spec <- rand_forest(trees = 500) |> set_mode("classification") |> set_engine("ranger")
+```
+
+### 4.3
+```{r}
+shared_recipe <- recipe(class ~ ., data = train_data)
+eval_metrics <- metric_set(accuracy, sensitivity, specificity, f_meas)
+
+logreg_wf <- workflow() |> add_recipe(shared_recipe) |> add_model(logreg_spec)
+logreg_cv_results <- logreg_wf |> fit_resamples(resamples = cv_folds, metrics = eval_metrics)
+
+rf_wf <- workflow() |> add_recipe(shared_recipe) |> add_model(rf_spec)
+rf_cv_results <- rf_wf |> fit_resamples(resamples = cv_folds, metrics = eval_metrics)
+```
+
+### 4.4
+```{r}
+logreg_metrics <- logreg_cv_results |> collect_metrics() |> mutate(model = "Logistic Regression")
+rf_metrics <- rf_cv_results |> collect_metrics() |> mutate(model = "Random Forest")
+comparison <- bind_rows(logreg_metrics, rf_metrics) |> select(model, .metric, mean, std_err)
+comparison
+```
+
+### 4.5
+```{r}
+ggplot(comparison, aes(x = .metric, y = mean, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err),
+                position = position_dodge(width = 0.8), width = 0.2) +
+  theme_minimal() +
+  labs(title = "Model Comparison", x = "Metric", y = "Value", fill = "Model") +
+  coord_cartesian(ylim = c(0.5, 1.0))
+```
+
+**Q1: Which model has higher mean accuracy? Is the difference large compared to the standard error bars? If the error bars overlap, can you confidently say one model is better?**
+
+*(The exact numbers vary by run, but typically random forest and logistic regression
+perform similarly on this dataset, with random forest having a slight edge.)*
+
+If the error bars **overlap**, you **cannot confidently say** one model is better. The
+overlap means the difference in mean accuracy is within the range of normal
+variation across CV folds. In statistical terms, the difference is not significant.
+
+This is actually a common and important result: for many datasets, especially
+smaller ones, several different models perform comparably. In that situation, you
+should prefer the **simpler, more interpretable model** (here: logistic regression)
+because:
+
+- It is easier to explain and debug.
+- It is less likely to overfit.
+- The coefficients have a direct biological interpretation (log-odds).
+
+Only choose a more complex model when it shows a clear, consistent advantage
+beyond the noise of cross-validation.
+
+**Q2: Look at sensitivity (ability to detect tumor) and specificity (ability to identify normal). Are they balanced? What would happen if you optimized only accuracy?**
+
+With our balanced simulated dataset (50/50 tumor/normal), sensitivity and
+specificity should be roughly similar for both models. This is the easy case.
+
+If you **optimized only accuracy** on an **imbalanced** dataset (say 90% normal,
+10% tumor), the model could learn to predict "normal" almost always and still
+achieve 90% accuracy. The result: high specificity (correctly identifies most normals)
+but very low sensitivity (misses most tumors). This is clinically dangerous because
+the whole point of a screening model is to catch the rare disease cases.
+
+That is why in practice you should:
+
+- Always look at sensitivity and specificity separately, not just accuracy.
+- Use metrics like balanced accuracy, F1, or AUC that penalize this shortcut.
+- Consider the application context: in medical screening, sensitivity is usually
+  prioritized over specificity.
+
+**Q3: Logistic regression is linear and random forest is non-linear. For this simulated dataset, do you think the relationship between expression and class is linear or non-linear? Does the comparison support your answer?**
+
+In our simulation, the DE genes have a **shifted mean** between tumor and normal
+(we added a constant to gene_1 through gene_10 in the tumor group). This creates
+a **linear** relationship — the classes can be separated by a straight boundary in
+feature space. There are no interaction effects, threshold effects, or complex
+nonlinear patterns.
+
+The comparison supports this: logistic regression performs **nearly as well as** (or
+equal to) random forest. If the true relationship were strongly nonlinear (e.g.,
+tumor samples had high expression of gene_1 *only when* gene_2 was also low),
+random forest would show a clear advantage because it can model interactions and
+nonlinear boundaries, while logistic regression cannot.
+
+**Takeaway:** When the signal is linear, a linear model is sufficient — and preferable
+for its interpretability. Random forests and other nonlinear methods earn their keep
+when relationships in the data are complex, which is often the case with real
+biological data (pathway interactions, epistasis, threshold effects).
+
+**Q4: We used 5 folds. What would change with 10 folds? With leave-one-out? What are the trade-offs?**
+
+| | 5-fold CV | 10-fold CV | Leave-one-out (LOOCV) |
+|---|---|---|---|
+| **Training set size** | 80% of data | 90% of data | n - 1 samples |
+| **Bias** | Slightly higher (smaller training set) | Lower | Lowest (almost all data used for training) |
+| **Variance** | Lower (fewer, more different folds) | Moderate | Highest (folds are nearly identical, estimates are correlated) |
+| **Computation** | Fast (5 fits) | Moderate (10 fits) | Expensive (n fits, one per sample) |
+| **Stability** | More variable between runs | More stable | Deterministic (no randomness) |
+
+**Practical guidance:**
+
+- **5-fold CV** is a good default for smaller datasets — fast and provides a reasonable
+  estimate. It slightly underestimates performance because each fold trains on only
+  80% of the data.
+- **10-fold CV** is a common standard in ML literature and generally offers a better
+  bias-variance tradeoff. It is often paired with **repeats** (e.g., 5 × repeated 10-fold
+  CV) to further stabilize estimates.
+- **LOOCV** uses the most data for training (lowest bias) but produces highly
+  correlated fold estimates, leading to high variance in the final metric. It is also
+  computationally expensive. It is mainly useful for very small datasets (n < 50)
+  where you cannot afford to hold out even 10% of the data.
+
+For this course's dataset (200 samples), 5-fold or 10-fold with repeats are both
+sensible choices.
+
+### 4.6 (Stretch)
+```{r}
+set.seed(42)
+repeated_folds <- vfold_cv(data = train_data, v = 5, repeats = 3, strata = class)
+rf_repeated_results <- rf_wf |> fit_resamples(resamples = repeated_folds, metrics = eval_metrics)
+rf_repeated_results |> collect_metrics()
+```

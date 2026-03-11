@@ -1,0 +1,160 @@
+---
+title: "Exercise 3: Your First Classifier -- SOLUTIONS"
+subtitle: Machine Learning with R in the Life Sciences
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Setup
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+set.seed(2025)
+n_samples <- 200; n_genes <- 50; n_de_genes <- 10
+sample_class <- factor(rep(c("tumor", "normal"), each = n_samples / 2))
+expression_matrix <- matrix(rnorm(n_samples * n_genes, mean = 8, sd = 1.5),
+                            nrow = n_samples, ncol = n_genes)
+colnames(expression_matrix) <- paste0("gene_", 1:n_genes)
+for (i in 1:n_de_genes) {
+  expression_matrix[1:(n_samples / 2), i] <-
+    expression_matrix[1:(n_samples / 2), i] + rnorm(n_samples / 2, mean = 2, sd = 0.5)
+}
+gene_data <- as.data.frame(expression_matrix) |> mutate(class = sample_class)
+```
+
+### 3.1
+```{r}
+ggplot(gene_data, aes(x = class, y = gene_1, fill = class)) +
+  geom_boxplot() + theme_minimal() + labs(title = "Gene 1 (Differentially Expressed)")
+
+ggplot(gene_data, aes(x = class, y = gene_40, fill = class)) +
+  geom_boxplot() + theme_minimal() + labs(title = "Gene 40 (Not Differentially Expressed)")
+```
+
+**Q: Can you visually see the difference in gene_1? What about gene_40?**
+
+**gene_1:** Yes — the boxplot should show a clear shift between the tumor and normal
+groups. This is expected because gene_1 is one of the 10 truly differentially
+expressed (DE) genes in our simulation. The tumor group has a noticeably higher (or
+lower, depending on the simulation run) median expression, and the boxes have
+limited overlap.
+
+**gene_40:** No meaningful visual difference. The two boxplots should look nearly
+identical — similar medians, similar spread, heavy overlap. This is because gene_40
+is a noise gene with no built-in association with the class label. Any small difference
+you see is just random variation.
+
+This comparison illustrates a fundamental point: **not all features are informative**.
+In a real transcriptomics dataset with 20,000 genes, only a small subset will be
+relevant to your phenotype of interest. The challenge of ML is to find and use those
+informative features while ignoring the noise — which is exactly what feature
+selection and well-regularized models do.
+
+It also shows why exploratory visualization is valuable before modeling: a quick look
+at a few features can already tell you whether there is signal in your data.
+
+### 3.2
+```{r}
+set.seed(123)
+split <- initial_split(gene_data, prop = 0.75, strata = class)
+train_data <- training(split)
+test_data  <- testing(split)
+cat("Training:", nrow(train_data), "Test:", nrow(test_data), "\n")
+table(train_data$class)
+```
+
+### 3.3
+```{r}
+log_reg_spec <- logistic_reg() |>
+  set_mode("classification") |>
+  set_engine("glm")
+```
+
+### 3.4
+```{r}
+train_recipe <- recipe(class ~ ., data = train_data)
+wf <- workflow() |>
+  add_recipe(train_recipe) |>
+  add_model(log_reg_spec)
+fitted_model <- wf |> fit(data = train_data)
+```
+
+### 3.5
+```{r}
+predictions <- fitted_model |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data |> select(class))
+head(predictions)
+```
+
+### 3.6
+```{r}
+conf_mat(predictions, truth = class, estimate = .pred_class)
+```
+
+### 3.7
+```{r}
+predictions |> metrics(truth = class, estimate = .pred_class)
+```
+
+### Discussion Questions — Solutions
+
+**Q1: Is accuracy alone sufficient to judge this model? What if the dataset were 95% normal and 5% tumor?**
+
+No. In our simulated dataset we have a balanced 50/50 split (100 tumor,
+100 normal), so accuracy is a reasonable metric here. But if the dataset were
+**95% normal and 5% tumor**, a trivial model that predicts "normal" for every sample
+would achieve 95% accuracy while missing every single tumor case — which is
+clinically useless.
+
+In that scenario you must look at:
+
+- **Sensitivity** — what fraction of actual tumors did we detect?
+- **Specificity** — what fraction of healthy samples did we correctly identify?
+- Metrics designed for imbalance: **balanced accuracy**, **F1 score**, or **AUC**
+
+This is why the confusion matrix is so important: it tells you *where* the errors are,
+not just how many.
+
+**Q2: Looking at the confusion matrix: does the model make more false positives or false negatives? Which error is worse in a clinical screening context?**
+
+*(The exact numbers dependon your run, but typically the model makes
+both types of errors in roughly similar numbers with this balanced simulated data.)*
+
+In a **clinical screening context**, **false negatives are worse**: a false negative means
+a tumor patient is told they are healthy and may not receive timely treatment. A
+false positive (healthy person flagged as tumor) leads to unnecessary follow-up
+tests, which is stressful and costly but not life-threatening.
+
+General principle in medical screening: we prefer **high sensitivity** (catching as many
+true cases as possible) even at the expense of lower specificity (more false alarms).
+The acceptable tradeoff depends on the cost and invasiveness of follow-up — for a
+cheap blood test you can tolerate many false positives, but for an invasive biopsy
+you want fewer.
+
+**Q3: We used ALL 50 genes as features. Some are just noise. Would the model perform better with fewer, carefully selected genes?**
+
+Very likely yes. Only **gene_1 through gene_10** are truly differentially expressed —
+the other 40 genes are pure noise. Including noise features forces the model to
+"learn" that they are irrelevant, which wastes model capacity and can cause
+overfitting, especially with small sample sizes.
+
+**Feature selection** (e.g., `step_nzv()` for near-zero variance filtering,
+`step_corr()` for correlation filtering, or model-based importance from a random
+forest) could remove the noise genes and likely improve performance.
+
+Key lesson for life science ML: with omics data, feature selection is often more
+impactful than choosing a fancier model.
+
+**Important caveat:** Feature selection must happen **inside** the cross-validation loop
+to avoid data leakage.
