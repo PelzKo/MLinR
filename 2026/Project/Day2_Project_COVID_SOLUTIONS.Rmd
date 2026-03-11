@@ -1,0 +1,676 @@
+---
+title: "Day 2 Project: COVID-19 Severity — SOLUTIONS"
+subtitle: "Machine Learning with R in the Life Sciences"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+> **INSTRUCTOR COPY** — This notebook contains complete solutions and
+> teaching notes. Do NOT distribute to students.
+
+---
+
+# 0. Setup
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+library(vip)
+```
+
+---
+
+# 1. Load and Explore the Data
+
+```{r load-data}
+expr <- read_csv("covid_expression.csv", show_col_types = FALSE)
+meta <- read_csv("covid_metadata.csv", show_col_types = FALSE)
+
+dim(expr)   # 126 samples × 5001 columns (sample_id + 5000 genes)
+dim(meta)   # 126 samples × 20 columns
+```
+
+```{r prepare-data}
+ml_data <- expr |>
+  inner_join(meta, by = "sample_id")
+gene_cols <- expr |> select(-sample_id) |> colnames()
+
+# ---- TASK A: COVID-19 diagnosis (all 126 samples) ----
+target_col <- "disease_state"
+ml_data <- ml_data |>
+  mutate(target = factor(get(target_col),
+                         levels = c("non-COVID-19", "COVID-19"))) |>
+  select(all_of(gene_cols), target)
+
+# ---- To switch to TASK B, uncomment below and comment out above ----
+# target_col <- "icu"
+# ml_data <- ml_data |>
+#   filter(disease_state == "COVID-19") |>
+#   mutate(target = factor(get(target_col), levels = c("no", "yes"))) |>
+#   select(all_of(gene_cols), target)
+
+table(ml_data$target)
+```
+
+> **TEACHING NOTE:** Task A has 100 COVID vs 26 non-COVID (77:23 ratio).
+> This imbalance is moderate — enough to affect metrics but not catastrophic.
+> Task B has 50 ICU vs 50 non-ICU — perfectly balanced. Discuss why balanced
+> data makes evaluation simpler.
+
+```{r class-balance}
+ggplot(ml_data, aes(x = target, fill = target)) +
+  geom_bar() +
+  labs(title = "Class Distribution", x = "Class", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+```
+
+```{r pca}
+pca_input <- ml_data |> select(-target)
+
+pca_result <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+var_explained <- summary(pca_result)$importance[2, 1:2] * 100
+
+pca_df <- data.frame(
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  target = ml_data$target
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, colour = target)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(
+    title = "PCA of Gene Expression",
+    x = paste0("PC1 (", round(var_explained[1], 1), "% variance)"),
+    y = paste0("PC2 (", round(var_explained[2], 1), "% variance)"),
+    colour = "Class"
+  ) +
+  theme_minimal() +
+  scale_colour_brewer(palette = "Set1")
+```
+
+> **TEACHING NOTE (Task A):** Expect clear separation in PCA — COVID-19
+> patients cluster distinctly, driven largely by adaptive immune activation
+> (plasmablast expansion, immunoglobulin production) and to some extent
+> innate immune signaling. PC1 captures ~15-25% of variance and largely
+> separates the groups. This predicts that ML will achieve high accuracy
+> (85-95%).
+>
+> **TEACHING NOTE (Task B):** Expect weaker separation for ICU vs non-ICU.
+> The two groups overlap considerably because severity differences are more
+> subtle. This predicts moderate accuracy (70-85%).
+
+---
+
+# 2. Feature Selection
+
+```{r feature-selection}
+gene_variances <- ml_data |>
+  select(-target) |>
+  summarise(across(everything(), var)) |>
+  pivot_longer(everything(), names_to = "gene", values_to = "variance") |>
+  arrange(desc(variance))
+
+head(gene_variances, 20)
+```
+
+> **TEACHING NOTE:** Students should see IFI27 near the top (variance rank ~3).
+> This is the most differentially expressed gene in COVID-19 blood — a key
+> interferon-stimulated gene. Other expected top hits: DEFA3/4 (neutrophil
+> defensins), LTF (lactoferrin), MMP8 (neutrophil collagenase). Discuss
+> how high variance often correlates with biological relevance in disease
+> comparisons.
+
+```{r filter-rrna}
+# Remove ribosomal RNA genes — technical artifacts, not biology
+rrna_pattern <- "^RNA\\d+S"
+n_rrna <- sum(str_detect(gene_variances$gene, rrna_pattern))
+
+gene_variances_clean <- gene_variances |>
+  filter(!str_detect(gene, rrna_pattern))
+
+cat("Ribosomal RNA genes removed:", n_rrna, "\n")
+cat("Genes remaining:", nrow(gene_variances_clean), "\n")
+```
+
+> **TEACHING NOTE:** This filtering step is critical for biological
+> interpretability. Without it, ~6-8 rRNA genes will appear in the top 20
+> important features from the random forest, making the results confusing
+> to interpret. The model may still perform well (rRNA levels can
+> correlate with sample processing batches that happen to align with
+> disease groups), but the biological conclusions would be misleading.
+> This is one of the most important lessons: **ML doesn't know or care
+> whether a feature is biologically meaningful — it just finds whatever
+> separates the classes, including technical noise.**
+
+```{r select-top-genes}
+n_features <- 500
+top_genes <- gene_variances_clean |>
+  slice_head(n = n_features) |>
+  pull(gene)
+
+ml_reduced <- ml_data |>
+  select(target, all_of(top_genes))
+
+cat("Reduced dataset:", nrow(ml_reduced), "samples,", n_features, "genes\n")
+```
+
+---
+
+# 3. Set Up the ML Pipeline
+
+```{r recipe}
+
+set.seed(42)
+split <- initial_split(ml_reduced, prop = 0.75, strata = target)
+train_data <- training(split)
+test_data  <- testing(split)
+
+ml_recipe <- recipe(target ~ ., data = train_data) |>
+  step_zv(all_of(top_genes)) |>
+  step_normalize(all_of(top_genes))
+
+ml_recipe
+```
+
+```{r cv-folds}
+set.seed(42)
+cv_folds <- vfold_cv(
+  train_data,
+  v = 10,
+  strata = target
+)
+cv_folds
+```
+
+> **TEACHING NOTE:** With 126 samples, 10-fold CV gives ~12 samples per
+> fold — reasonable. 5-fold would also work (larger test sets, more stable
+> per-fold estimates). LOOCV is possible but computationally expensive and
+> gives high-variance estimates. Discuss the bias-variance tradeoff of
+> different k values.
+
+---
+
+# 4. Train a Random Forest
+
+```{r rf-spec}
+rf_spec <- rand_forest(
+  trees = 500,
+  mtry = round(sqrt(500)),  # ~22 features per split
+  min_n = 5
+) |>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("classification")
+```
+
+```{r rf-fit}
+rf_workflow <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(rf_spec)
+
+set.seed(42)
+rf_results <- fit_resamples(
+  rf_workflow,
+  resamples = cv_folds,
+  metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
+  control = control_resamples(save_pred = TRUE)
+)
+
+collect_metrics(rf_results)
+```
+
+> **EXPECTED RESULTS (Task A):** Accuracy ~90-95%, AUC ~0.95-0.99.
+> The strong interferon signature makes COVID vs non-COVID classification
+> straightforward. If students get lower results, check that the target is
+> defined correctly.
+>
+> **EXPECTED RESULTS (Task B):** Accuracy ~70-80%, AUC ~0.75-0.85.
+> ICU vs non-ICU is harder because the transcriptomic differences are more
+> subtle. This is a great teaching moment about realistic ML performance.
+
+```{r rf-confusion}
+rf_preds <- collect_predictions(rf_results)
+conf_mat(rf_preds, truth = target, estimate = .pred_class)
+```
+
+```{r rf-confusion-plot}
+conf_mat(rf_preds, truth = target, estimate = .pred_class) |>
+  autoplot(type = "heatmap") +
+  labs(title = "Random Forest — Confusion Matrix")
+```
+
+> **TEACHING NOTE:** For Task A, most errors will be non-COVID misclassified
+> as COVID (false positives), since the minority class has fewer training
+> examples. Discuss clinical implications: false negatives (missing a COVID
+> patient) are more dangerous than false positives (unnecessary isolation).
+
+---
+
+# 5. Train Elastic Net Logistic Regression
+
+```{r lr-spec}
+lr_spec <- logistic_reg(
+  penalty = 0.01,
+  mixture = 0.5  # Elastic net: blend of L1 (lasso) and L2 (ridge)
+) |>
+  set_engine("glmnet") |>
+  set_mode("classification")
+```
+
+```{r lr-fit}
+lr_workflow <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(lr_spec)
+
+set.seed(42)
+lr_results <- fit_resamples(
+  lr_workflow,
+  resamples = cv_folds,
+  metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
+  control = control_resamples(save_pred = TRUE)
+)
+
+collect_metrics(lr_results)
+```
+
+```{r lr-confusion}
+lr_preds <- collect_predictions(lr_results)
+conf_mat(lr_preds, truth = target, estimate = .pred_class)
+```
+
+
+> **TEACHING NOTE:** Elastic net often performs comparably to random forest
+> for Task A (strong signal benefits even simple models). For Task B, RF may
+> edge ahead because it captures non-linear interactions. The key teaching
+> point: when signal is strong, model choice matters less than when signal
+> is weak.
+
+```{r compare-models}
+rf_metrics <- collect_metrics(rf_results) |> mutate(model = "Random Forest")
+lr_metrics <- collect_metrics(lr_results) |> mutate(model = "Elastic Net")
+
+comparison <- bind_rows(rf_metrics, lr_metrics) |>
+  select(model, .metric, mean, std_err)
+
+comparison |>
+  pivot_wider(names_from = .metric, values_from = c(mean, std_err))
+```
+
+```{r compare-plot}
+comparison |>
+  ggplot(aes(x = .metric, y = mean, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean - std_err, ymax = mean + std_err),
+    position = position_dodge(width = 0.8), width = 0.2
+  ) +
+  labs(title = "Model Comparison", y = "Metric Value", x = "") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  coord_cartesian(ylim = c(0.5, 1.0))
+```
+
+---
+
+# 6. Feature Importance and Biological Interpretation
+
+```{r feature-importance}
+final_rf <- rf_workflow |>
+  last_fit(split = split)
+
+final_rf |>
+  extract_fit_parsnip() |>
+  vip(num_features = 20) +
+  labs(title = "Top 20 Important Genes (Random Forest)")
+```
+
+```{r top-genes}
+top_important <- final_rf |>
+  extract_fit_parsnip() |>
+  vi() |>
+  slice_head(n = 20)
+
+print(top_important)
+```
+
+> **ACTUAL TOP GENES (Task A — COVID vs non-COVID):**
+>
+> The top features from the random forest fall into three clear categories.
+> Crucially, they are **not** the interferon genes you might expect from
+> the literature — and understanding why is a key learning objective.
+>
+> **1. Cell proliferation genes (top 3):**
+>
+> - **RRM2** (Ribonucleotide Reductase M2): The #1 most important feature.
+>   Essential for DNA synthesis in dividing cells. Reflects actively
+>   proliferating lymphocytes — plasmablasts and activated T cells
+>   expanding during the adaptive immune response to SARS-CoV-2.
+> - **TYMS** (Thymidylate Synthase): Another DNA synthesis enzyme, also
+>   marking cell proliferation. Ranks #2.
+> - **MYBL2** (MYB Proto-Oncogene Like 2): A cell cycle transcription
+>   factor that drives G2/M progression. Ranks #3.
+>
+> **2. Immunoglobulin/B-cell genes:**
+>
+> - **JCHAIN** (Joining Chain): Essential for IgA and IgM polymer assembly.
+>   A hallmark marker of antibody-secreting plasma cells.
+> - **IGLC1, IGLC2, IGLC3** (Immunoglobulin Lambda Light Chains):
+>   Antibody light chain genes — their high importance confirms massive
+>   B cell/plasmablast expansion in COVID-19 patients.
+> - **IGHG1** (Immunoglobulin Heavy Constant Gamma 1): Encodes IgG1, the
+>   dominant antibody subclass in anti-SARS-CoV-2 responses.
+> - **TNFRSF17/BCMA** (B-Cell Maturation Antigen): Receptor critical for
+>   plasma cell survival — directly marks the plasmablast expansion.
+>
+> **3. Other:**
+>
+> - **TXNDC5** (Thioredoxin Domain Containing 5): Highly expressed in
+>   plasma cells (part of the ER protein-folding machinery needed for
+>   massive antibody production).
+> - **EPSTI1** (Epithelial Stromal Interaction 1): This one IS interferon-
+>   stimulated — so the innate response signal is not entirely absent,
+>   just not dominant.
+>
+> **Key biological narrative:** The ML model reveals that what best
+> *discriminates* COVID-19 from other hospitalized patients is the
+> **adaptive immune response** — specifically the massive expansion of
+> antibody-secreting cells (plasmablasts) and the associated cell
+> proliferation. This makes biological sense: non-COVID hospitalized
+> patients may also have activated innate immunity (interferon, neutrophils),
+> but they lack the specific SARS-CoV-2-driven B cell response.
+>
+> **TEACHING NOTE — Why not interferon genes?** Students may be confused
+> that IFI27, ISG15, MX1 etc. are not at the top, since these are the
+> "classic" COVID-19 genes in the literature. The key insight:
+>
+> 1. **The comparison group matters.** Published studies compare COVID vs
+>    *healthy controls*. Our dataset compares COVID vs *other sick patients*.
+>    Both groups likely have elevated interferon responses.
+> 2. **ML importance ≠ differential expression.** Importance measures
+>    discriminative power between YOUR specific classes, not general
+>    biological importance.
+> 3. **Correlated features split importance.** The interferon genes are
+>    highly co-regulated, so their individual importance gets diluted
+>    across many correlated features in the random forest.
+
+```{r boxplot-top-gene}
+# Visualize the expression of the top gene
+top_gene_name <- top_important$Variable[1]
+
+ml_data |>
+  ggplot(aes(x = target, y = .data[[top_gene_name]], fill = target)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1.5) +
+  labs(
+    title = paste0("Expression of ", top_gene_name, " by Class"),
+    y = "log2(TPM + 1)",
+    x = "Class"
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+```
+
+---
+
+# 7. ML Importance vs. Literature — A Critical Comparison
+
+This is one of the most important pedagogical moments in the project.
+
+```{r literature-comparison}
+# Genes consistently highlighted in COVID-19 literature
+# (based on COVID vs HEALTHY controls, not vs other sick patients)
+literature_genes <- c("IFI27", "ISG15", "MX1", "OAS1", "IFITM3",
+                      "CCL2", "S100A8", "S100A12", "IL1B")
+
+# Where do these rank in our variance-selected features?
+lit_in_features <- gene_variances_clean |>
+  mutate(rank = row_number()) |>
+  filter(gene %in% literature_genes)
+
+cat("Literature COVID genes — variance ranks:\n")
+print(lit_in_features)
+
+# Where do they rank in RF importance?
+all_importance <- final_rf |>
+  extract_fit_parsnip() |>
+  vi() |>
+  mutate(importance_rank = row_number())
+
+lit_in_importance <- all_importance |>
+  filter(Variable %in% literature_genes)
+
+cat("\nLiterature COVID genes — RF importance ranks:\n")
+print(lit_in_importance)
+```
+
+```{r importance-comparison-plot}
+# Visualize: compare a literature gene vs a top ML gene
+comparison_genes <- c("RRM2", "IFI27", "JCHAIN", "ISG15")
+comparison_genes_present <- comparison_genes[comparison_genes %in% colnames(ml_data)]
+
+if (length(comparison_genes_present) > 0) {
+  ml_data |>
+    select(target, all_of(comparison_genes_present)) |>
+    pivot_longer(-target, names_to = "gene", values_to = "expression") |>
+    mutate(gene = factor(gene, levels = comparison_genes_present)) |>
+    ggplot(aes(x = target, y = expression, fill = target)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 1) +
+    facet_wrap(~gene, scales = "free_y") +
+    labs(
+      title = "ML Top Genes vs. Literature Genes",
+      subtitle = "RRM2 and JCHAIN discriminate better than IFI27 and ISG15 in this comparison",
+      y = "log2(TPM + 1)", x = ""
+    ) +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2") +
+    theme(legend.position = "none")
+}
+```
+
+> **TEACHING NOTE — Key lesson for students:**
+>
+> This comparison is the core critical thinking exercise. Walk students
+> through the boxplots:
+>
+> - **RRM2 and JCHAIN** show clear separation between COVID and non-COVID
+>   groups — they are strong *discriminators* for this specific comparison.
+> - **IFI27 and ISG15** may show overlap between groups because the non-COVID
+>   patients (who are also hospitalized and sick) also have activated
+>   interferon responses.
+>
+> The take-home message: **ML feature importance tells you what separates
+> your specific classes, not what is "biologically important" in general.**
+> This is why domain knowledge + ML results together are more powerful than
+> either alone. A biologist who only reads the ML output might miss the
+> interferon story entirely; a biologist who only reads the literature might
+> build a classifier on the wrong features.
+>
+> This is also a good moment to discuss **external validation**: if you
+> trained this model on a dataset where the control group was healthy donors
+> instead of hospitalized patients, the top features would likely shift
+> dramatically toward interferon genes.
+
+---
+
+# 8. ROC Curve
+
+```{r roc-curve}
+# ROC curve for Random Forest
+rf_preds |>
+  roc_curve(truth = target, `.pred_COVID-19`, event_level = "second") |>
+  autoplot() +
+  labs(title = "ROC Curve — Random Forest (Task A)")
+```
+
+> **TEACHING NOTE:** For Task A, expect a ROC curve that hugs the upper-left
+> corner (AUC > 0.95). For Task B, the curve will be less ideal (AUC ~0.80).
+> This is a good moment to review what AUC means intuitively: the probability
+> that a randomly chosen positive sample ranks higher than a randomly chosen
+> negative sample.
+
+```{r roc-both}
+# Compare ROC curves of both models
+rf_roc <- rf_preds |>
+  roc_curve(truth = target, `.pred_COVID-19`, event_level = "second") |>
+  mutate(model = "Random Forest")
+
+lr_roc <- lr_preds |>
+  roc_curve(truth = target, `.pred_COVID-19`, event_level = "second") |>
+  mutate(model = "Elastic Net")
+
+bind_rows(rf_roc, lr_roc) |>
+  ggplot(aes(x = 1 - specificity, y = sensitivity, colour = model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(lty = 2, colour = "grey50") +
+  labs(title = "ROC Curve Comparison", colour = "Model") +
+  theme_minimal() +
+  scale_colour_brewer(palette = "Set1")
+```
+
+---
+
+# 9. Summary and Reflection
+
+> **MODEL ANSWER (Task A):**
+>
+> Using bulk RNA-seq from peripheral blood leukocytes (GSE157103), we
+> classified 126 hospitalized patients as COVID-19 positive (n=100) or
+> negative (n=26). Both random forest and elastic net logistic regression
+> achieved high accuracy (~90-95%) and AUC (~0.95-0.99), indicating a strong
+> transcriptomic signature of COVID-19 infection. Surprisingly, the most
+> important features were NOT the interferon-stimulated genes highlighted
+> in the literature (IFI27, ISG15), but rather cell proliferation markers
+> (RRM2, TYMS, MYBL2) and immunoglobulin genes (JCHAIN, IGLC1/2/3, IGHG1).
+> This reflects the adaptive immune response — specifically the massive
+> plasmablast expansion unique to SARS-CoV-2 infection — which distinguishes
+> COVID from other hospitalized patients more effectively than the innate
+> interferon response (which is shared across many infections). This result
+> highlights a critical lesson: ML importance identifies what discriminates
+> between specific groups, which may differ from what is generally considered
+> "important" in the disease biology literature.
+>
+> **MODEL ANSWER (Task B):**
+>
+> Among 100 COVID-19 patients, we classified ICU admission (n=50 ICU vs
+> n=50 non-ICU) using blood transcriptomics. Both models achieved moderate
+> accuracy (~70-80%) and AUC (~0.75-0.85), reflecting the more subtle
+> transcriptomic differences between severity levels. Top predictive genes
+> may include neutrophil activation markers (S100A8, S100A12, DEFA3) and
+> inflammatory mediators (IL1B), consistent with the role of neutrophil-driven
+> inflammation in severe COVID-19. The lower performance compared to Task A
+> illustrates that disease severity prediction is inherently harder than
+> diagnosis — severity exists on a continuum and depends on host factors
+> beyond the transcriptome.
+
+---
+
+# Bonus 1: Hyperparameter Tuning
+
+```{r bonus-tuning}
+rf_tune_spec <- rand_forest(
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+
+rf_tune_wf <- workflow() |>
+  add_recipe(ml_recipe) |>
+  add_model(rf_tune_spec)
+
+set.seed(42)
+rf_tune_results <- tune_grid(
+  rf_tune_wf,
+  resamples = cv_folds,
+  grid = grid_regular(
+    mtry(range = c(10, 50)),
+    min_n(range = c(2, 15)),
+    levels = 5
+  ),
+  metrics = metric_set(accuracy, roc_auc)
+)
+
+autoplot(rf_tune_results) +
+  labs(title = "Hyperparameter Tuning Results")
+```
+
+```{r best-params}
+show_best(rf_tune_results, metric = "roc_auc")
+```
+
+> **TEACHING NOTE:** Tuning typically gives marginal improvement for Task A
+> (the signal is so strong that default parameters work well). For Task B,
+> tuning may provide a 2-5% improvement. This teaches that hyperparameter
+> tuning matters more when signal is weak.
+
+---
+
+# Bonus 2: Clinical + Genomic Features
+
+```{r bonus-clinical}
+ml_data <- expr |>
+  inner_join(meta, by = "sample_id") |>
+  mutate(target = factor(get(target_col),
+                         levels = c("non-COVID-19", "COVID-19")))
+
+ml_clinical <- ml_data |>
+  select(target, all_of(top_genes), age_years, sex, charlson_score) |>
+  mutate(
+    age = as.numeric(age_years),
+    sex = factor(sex),
+    charlson_score = as.numeric(charlson_score)
+  ) |>
+  drop_na(age, sex, charlson_score)
+
+clinical_recipe <- recipe(target ~ ., data = ml_clinical) |>
+  step_zv(all_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+clinical_wf <- workflow() |>
+  add_recipe(clinical_recipe) |>
+  add_model(rf_spec)
+
+set.seed(42)
+cv_clinical <- vfold_cv(ml_clinical, v = 10, strata = target)
+
+clinical_results <- fit_resamples(
+  clinical_wf,
+  resamples = cv_clinical,
+  metrics = metric_set(accuracy, roc_auc)
+)
+
+collect_metrics(clinical_results)
+```
+```{r bonus-clinical-importance}
+final_clinical_rf <- clinical_wf |>
+  fit(data = ml_clinical)
+
+final_clinical_rf |>
+  extract_fit_parsnip() |>
+  vip(num_features = 20) +
+  labs(title = "Top 20 Important Genes (Random Forest)")
+```
+
+> **TEACHING NOTE:** Adding clinical variables to Task B can improve
+> performance slightly (APACHE II and SOFA scores are direct indicators of
+> ICU-level illness). For Task A, clinical variables add little because the
+> gene expression signal is already very strong. This illustrates the concept
+> of complementary information — clinical features help when the genomic
+> signal is insufficient.
+
+---
+
+*End of solutions notebook.*

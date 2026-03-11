@@ -78,19 +78,22 @@ We merge expression and metadata, then define the classification target.
 # Merge expression with metadata by sample_id
 ml_data <- expr |>
   inner_join(meta, by = "sample_id")
+gene_cols <- expr |> select(-sample_id) |> colnames()
 
 # ---- TASK A: COVID-19 diagnosis (all 126 samples) ----
 target_col <- "disease_state"
 ml_data <- ml_data |>
   mutate(target = factor(___________,
-                         levels = _____________))
+                         levels = _____________)) |>
+  select(all_of(gene_cols), target)
 
 # ---- TASK B: ICU admission (COVID-19 patients only, n=100) ----
 # Uncomment below and comment out Task A above to switch
 # target_col <- "icu"
 # ml_data <- ml_data |>
 #   filter(disease_state == "COVID-19") |>
-#   mutate(target = factor(________-, levels = ____________))
+#   mutate(target = factor(________-, levels = ____________)) |>
+#   select(all_of(gene_cols), target)
 
 # Check class distribution
 table(ml_data$target)
@@ -115,10 +118,11 @@ ______
 **YOUR TURN:** Run PCA on the gene expression data and visualize.
 
 ```{r pca}
-# Step 1: Extract the gene columns (all numeric feature columns)
-
+# Step 1: Remove the target columns , so we only have numeric feature columns
+pca_input <- _____________
 
 # Step 2: Run PCA
+pca_result <- __________
 
 
 # Step 3: Calculate variance explained
@@ -144,7 +148,7 @@ We will select the most variable genes to reduce dimensionality.
 ```{r feature-selection}
 # FILL IN: Calculate variance of each gene across samples
 gene_variances <- ml_data |>
-  select(all_of(gene_cols)) |>
+  select(-target) |>
   summarise(across(everything(), ___)) |>
   pivot_longer(everything(), names_to = "gene", values_to = "variance") |>
   arrange(desc(variance))
@@ -174,13 +178,13 @@ cat("Genes remaining:", nrow(gene_variances_clean), "\n")
 ```{r select-top-genes}
 # Select the top 500 most variable genes
 n_features <- _____
-top_genes <- gene_variances |>
+top_genes <- gene_variances_clean |>
   slice_head(n = n_features) |>
   pull(gene)
 
 # Create a reduced dataset
 ml_reduced <- ml_data |>
-  select(sample_id, target, all_of(top_genes))
+  select(target, all_of(top_genes))
 
 cat("Reduced dataset:", nrow(ml_reduced), "samples,", n_features, "genes\n")
 ```
@@ -198,6 +202,11 @@ cat("Reduced dataset:", nrow(ml_reduced), "samples,", n_features, "genes\n")
 # FILL IN: Create a tidymodels recipe
 # The formula should predict 'target' from all gene columns
 # Include normalization steps
+
+set.seed(42)
+split <- initial_split(ml_reduced, prop = 0.75, strata = target)
+train_data <- training(split)
+test_data  <- testing(split)
 
 ml_recipe <- _____________
 
@@ -305,6 +314,11 @@ lr_results <- fit_resamples(
 collect_metrics(lr_results)
 ```
 
+```{r lr-confusion}
+lr_preds <- collect_predictions(lr_results)
+conf_mat(lr_preds, truth = target, estimate = .pred_class)
+```
+
 ## 5.3 Compare models
 
 ```{r compare-models}
@@ -320,6 +334,20 @@ comparison |>
   pivot_wider(names_from = .metric, values_from = c(mean, std_err))
 ```
 
+```{r compare-plot}
+comparison |>
+  ggplot(aes(x = .metric, y = mean, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean - std_err, ymax = mean + std_err),
+    position = position_dodge(width = 0.8), width = 0.2
+  ) +
+  labs(title = "Model Comparison", y = "Metric Value", x = "") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  coord_cartesian(ylim = c(0.5, 1.0))
+```
+
 > **Question:** Which model performs better? Is the difference meaningful
 > given the standard errors?
 
@@ -330,9 +358,11 @@ comparison |>
 ## 6.1 Extract important features
 
 ```{r feature-importance}
-# Fit the final RF model on all data
+# Fit the final RF model on all data and extract the final metrics
 final_rf <- rf_workflow |>
-  fit(_________)
+  last_fit(split =_________)
+
+final_rf_metrics <- ______
 
 # Extract and plot variable importance
 final_rf |>
@@ -348,6 +378,24 @@ top_important <- final_rf |>
   _____________________
 
 print(top_important)
+```
+
+```{r boxplot-top-gene}
+# Visualize the expression of the top gene
+top_gene_name <- top_important$Variable[1]
+
+ml_data |>
+  ggplot(aes(x = target, y = .data[[top_gene_name]], fill = target)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1.5) +
+  labs(
+    title = paste0("Expression of ", top_gene_name, " by Class"),
+    y = "log2(TPM + 1)",
+    x = "Class"
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
 ```
 
 > **YOUR TURN — Discussion Questions:**
@@ -383,11 +431,49 @@ literature_genes <- c("IFI27", "ISG15", "MX1", "OAS1", "IFITM3",
                       "CCL2", "S100A8", "S100A12", "IL1B")
 
 # Check: are they in the top 20? Top 50? Top 100? Where do they rank?
-lit_ranks <- gene_variances_clean |>
+lit_in_features <- gene_variances_clean |>
   mutate(rank = row_number()) |>
-  filter(gene %in% literature_genes)
+  filter(__________)
 
-print(lit_ranks)
+cat("Literature COVID genes — variance ranks:\n")
+print(lit_in_features)
+
+# Where do they rank in RF importance?
+all_importance <- final_rf |>
+  extract_fit_parsnip() |>
+  vi() |>
+  mutate(importance_rank = row_number())
+
+lit_in_importance <- all_importance |>
+  filter(Variable %in% literature_genes)
+
+cat("\nLiterature COVID genes — RF importance ranks:\n")
+print(lit_in_importance)
+```
+
+```{r importance-comparison-plot}
+# Visualize: compare a literature gene vs a top ML gene
+comparison_genes <- c("RRM2", "IFI27", "JCHAIN", "ISG15")
+comparison_genes_present <- comparison_genes[comparison_genes %in% colnames(ml_data)]
+
+if (length(comparison_genes_present) > 0) {
+  ml_data |>
+    select(target, all_of(comparison_genes_present)) |>
+    pivot_longer(-target, names_to = "gene", values_to = "expression") |>
+    mutate(gene = factor(gene, levels = comparison_genes_present)) |>
+    ggplot(aes(x = target, y = expression, fill = target)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 1) +
+    facet_wrap(~gene, scales = "free_y") +
+    labs(
+      title = "ML Top Genes vs. Literature Genes",
+      subtitle = "RRM2 and JCHAIN discriminate better than IFI27 and ISG15 in this comparison",
+      y = "log2(TPM + 1)", x = ""
+    ) +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2") +
+    theme(legend.position = "none")
+}
 ```
 
 > **Discussion — Why the discrepancy?**
@@ -409,12 +495,28 @@ print(lit_ranks)
 ```{r roc-curve}
 # FILL IN: Create an ROC curve for the best model
 # Hint: Use the predictions from rf_results or lr_results
+_______ |>
+  roc_curve(truth = _____, _______, event_level = "second") |>
+  autoplot() +
+  labs(title = "ROC Curve — ______")
 
-best_preds <- collect_predictions(rf_results)
 
-# FILL IN: Plot the ROC curve
-# Hint: roc_curve(best_preds, truth = ___, ___) |> autoplot()
-______
+# FILL IN: Plot the ROC curves of both models
+rf_roc <- rf_preds |>
+  roc_curve(truth = _____, _______, event_level = "second") |>
+  mutate(model = "Random Forest")
+
+lr_roc <- lr_preds |>
+  roc_curve(truth = _____, ________, event_level = "second") |>
+  mutate(model = "Elastic Net")
+
+bind_rows(rf_roc, lr_roc) |>
+  ggplot(aes(x = 1 - specificity, y = sensitivity, colour = model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(lty = 2, colour = "grey50") +
+  labs(title = "ROC Curve Comparison", colour = "Model") +
+  theme_minimal() +
+  scale_colour_brewer(palette = "Set1")
 ```
 
 ---
@@ -455,23 +557,46 @@ rf_tune_wf <- workflow() |>
 ______
 ```
 
+```{r best-params}
+show_best(rf_tune_results, metric = "roc_auc")
+```
+
 ## Bonus 2: Include Clinical Variables
 
 Try adding clinical metadata (age, sex, Charlson score) as additional features.
 
 ```{r bonus-clinical, eval=FALSE}
+ml_data <- expr |>
+  inner_join(meta, by = "sample_id") |>
+  mutate(target = factor(get(target_col),
+                         levels = c("non-COVID-19", "COVID-19")))
+
 # Create a dataset with both gene expression and clinical features
 ml_clinical <- ml_data |>
-  select(target, all_of(top_genes), age, sex, charlson_score) |>
+  select(target, all_of(top_genes), age_years, sex, charlson_score) |>
   mutate(
     age = as.numeric(age),
     sex = factor(sex),
     charlson_score = as.numeric(charlson_score)
-  )
+  ) |>
+  drop_na(age, sex, charlson_score)
 
 # FILL IN: Create a recipe that handles both numeric and categorical predictors
 # Hint: add step_dummy(all_nominal_predictors()) for the sex variable
-______
+clinical_recipe <- ______
+
+clinical_wf <- workflow() |>
+  _________
+
+cv_clinical <- vfold_cv(ml_clinical, v = 10, strata = target)
+
+clinical_results <- fit_resamples(
+  ___________,
+  resamples = ________,
+  metrics = metric_set(accuracy, roc_auc)
+)
+
+collect_metrics(clinical_results)
 ```
 
 ## Bonus 3: Compare Task A vs Task B
